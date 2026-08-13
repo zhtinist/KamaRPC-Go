@@ -31,6 +31,7 @@ var (
 	// 所以这里默认放开, 想压限流本身就把它调小
 	rate     = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
 	poolSize = flag.Int("pool", 1, "单个目标节点的连接池大小")
+	batchAPI = flag.Bool("batchapi", true, "是否用 InvokeAsyncBatch 批量接口(false 则逐条 InvokeAsync)")
 )
 
 type callResult struct {
@@ -100,20 +101,40 @@ func main() {
 
 				var calls []callResult
 
-				for j := 0; j < currentBatch; j++ {
-					args := &api.Args{A: j, B: j}
+				if *batchAPI {
+					batch := make([]client.BatchCall, currentBatch)
+					for j := 0; j < currentBatch; j++ {
+						batch[j] = client.BatchCall{Method: *methodName, Args: &api.Args{A: j, B: j}}
+					}
 					reqStart := time.Now()
 
-					f, err := c.InvokeAsync(context.Background(), *serviceName, *methodName, args)
+					futures, err := c.InvokeAsyncBatch(context.Background(), *serviceName, batch)
 					if err != nil {
 						if errors.Is(err, client.ErrRateLimited) {
-							atomic.AddInt64(&throttledCount, 1)
+							atomic.AddInt64(&throttledCount, int64(currentBatch))
 						} else {
-							atomic.AddInt64(&failCount, 1)
+							atomic.AddInt64(&failCount, int64(currentBatch))
 						}
-						continue
 					}
-					calls = append(calls, callResult{future: f, reqStart: reqStart})
+					for _, f := range futures {
+						calls = append(calls, callResult{future: f, reqStart: reqStart})
+					}
+				} else {
+					for j := 0; j < currentBatch; j++ {
+						args := &api.Args{A: j, B: j}
+						reqStart := time.Now()
+
+						f, err := c.InvokeAsync(context.Background(), *serviceName, *methodName, args)
+						if err != nil {
+							if errors.Is(err, client.ErrRateLimited) {
+								atomic.AddInt64(&throttledCount, 1)
+							} else {
+								atomic.AddInt64(&failCount, 1)
+							}
+							continue
+						}
+						calls = append(calls, callResult{future: f, reqStart: reqStart})
+					}
 				}
 
 				doneCh := make(chan callResult, len(calls))

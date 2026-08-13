@@ -108,6 +108,71 @@ func (c *TCPClient) SendAsync(msg *protocol.Message) (*Future, error) {
 	return future, nil
 }
 
+// SendAsyncBatch 一次性发出多条请求, 编码进同一个缓冲、只写一次。
+//
+// 单协程连续发请求时, 写合并(group commit)是不生效的 —— 没有并发写就没有
+// 可合并的对象。异步批量场景正是这种形态: 一个协程连发 N 个请求, 每个各来
+// 一次 write。这个接口把它压成一次。
+//
+// 语义是全有或全无: 任何一步失败都会撤销本批已登记的 Future 并返回错误
+func (c *TCPClient) SendAsyncBatch(msgs []*protocol.Message) ([]*Future, error) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	if atomic.LoadInt32(&c.closed) == 1 {
+		return nil, ErrConnClosed
+	}
+
+	futures := make([]*Future, len(msgs))
+	seqs := make([]uint64, len(msgs))
+
+	bufp := writeBufPool.Get().(*[]byte)
+	buf := (*bufp)[:0]
+
+	rollback := func(n int) {
+		for i := 0; i < n; i++ {
+			c.pending.Delete(seqs[i])
+		}
+		if cap(buf) <= maxPooledWriteBuf {
+			*bufp = buf
+			writeBufPool.Put(bufp)
+		}
+	}
+
+	for i, msg := range msgs {
+		seq := c.nextSeq()
+		msg.Header.RequestID = seq
+
+		future := NewFuture()
+		c.pending.Store(seq, future)
+		futures[i], seqs[i] = future, seq
+
+		var err error
+		if buf, err = protocol.AppendEncoded(buf, msg); err != nil {
+			rollback(i + 1)
+			return nil, err
+		}
+	}
+
+	err := c.conn.WriteRaw(buf)
+
+	*bufp = buf
+	if cap(buf) <= maxPooledWriteBuf {
+		writeBufPool.Put(bufp)
+	}
+
+	if err != nil {
+		// 与单条发送一致: 写失败即判定连接已死, 让全部在途请求失败
+		for _, seq := range seqs {
+			c.pending.Delete(seq)
+		}
+		c.fail(err)
+		return nil, err
+	}
+
+	return futures, nil
+}
+
 // IsClosed 连接是否已关闭
 func (c *TCPClient) IsClosed() bool {
 	return atomic.LoadInt32(&c.closed) == 1

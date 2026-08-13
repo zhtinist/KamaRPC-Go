@@ -175,6 +175,95 @@ func (c *Client) InvokeAsync(ctx context.Context, service string, method string,
 	return future, nil
 }
 
+// BatchCall 批量调用里的一次调用
+type BatchCall struct {
+	Method string
+	Args   interface{}
+}
+
+// InvokeAsyncBatch 把同一个服务的多次调用打成一批发出, 只写一次 socket。
+//
+// 与循环调用 InvokeAsync 的区别: 服务发现、选址、熔断判断、取连接都只做一次,
+// 而且 N 个请求编码进同一个缓冲、一次写出。适合客户端本来就要连发一批请求的
+// 场景(比如批量查询), 单条请求的延迟敏感场景仍然用 InvokeAsync。
+//
+// 全有或全无: 任何一步失败都返回错误, 不会有部分请求已发出的中间状态
+func (c *Client) InvokeAsyncBatch(ctx context.Context, service string, calls []BatchCall) ([]*transport.Future, error) {
+	if len(calls) == 0 {
+		return nil, nil
+	}
+
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil, ErrClientClosed
+	}
+
+	// 限流按请求条数扣减, 不能整批只算一个
+	for i := 0; i < len(calls); i++ {
+		if !c.limiter.Allow() {
+			return nil, ErrRateLimited
+		}
+	}
+
+	addr, err := c.getAddr(service)
+	if err != nil {
+		return nil, err
+	}
+
+	br := c.getBreaker(service, addr)
+	if !br.Allow() {
+		return nil, ErrBreakerOpen
+	}
+
+	pool := c.getPool(addr)
+
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		br.RecordFailure()
+		return nil, err
+	}
+
+	msgs := make([]*protocol.Message, len(calls))
+	headers := make([]protocol.Header, len(calls))
+	for i, call := range calls {
+		body, err := c.codec.Marshal(call.Args)
+		if err != nil {
+			return nil, err
+		}
+		headers[i] = protocol.Header{
+			ServiceName: service,
+			MethodName:  call.Method,
+			CodecType:   c.codec.Type(),
+			Compression: codec.CompressionGzip,
+		}
+		msgs[i] = &protocol.Message{Header: &headers[i], Body: body}
+	}
+
+	futures, err := conn.SendAsyncBatch(msgs)
+	if err != nil {
+		br.RecordFailure()
+		return nil, err
+	}
+
+	for _, future := range futures {
+		future.SetCodec(c.codec)
+		future.OnComplete(func(err error) {
+			if err != nil {
+				br.RecordFailure()
+			} else {
+				br.RecordSuccess()
+			}
+		})
+	}
+
+	return futures, nil
+}
+
 // Invoke 同步调用, 本质是 InvokeAsync + 等待 Future
 func (c *Client) Invoke(ctx context.Context, service string, method string, args interface{}, reply interface{}) error {
 	future, err := c.InvokeAsync(ctx, service, method, args)
