@@ -15,6 +15,7 @@ var (
 	etcdAddr  = flag.String("etcd", "localhost:2379", "etcd 地址")
 	advertise = flag.String("advertise", "localhost:9091", "注册到 etcd 的地址")
 	ttl       = flag.Int64("ttl", 10, "租约时间(秒)")
+	rate      = flag.Int("rate", 100000, "服务端限流速率(每秒令牌数)")
 )
 
 // server2 与 server1 的区别只有端口和注册的服务数量,
@@ -28,7 +29,10 @@ func main() {
 	}
 	defer reg.Close()
 
-	srv, err := server.NewServer(*addr, server.WithServerCodec(codec.JSON))
+	srv, err := server.NewServer(*addr,
+		server.WithServerCodec(codec.JSON),
+		server.WithServerRateLimit(*rate),
+	)
 	if err != nil {
 		log.Fatalf("create server failed: %v", err)
 	}

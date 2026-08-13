@@ -24,6 +24,26 @@ var (
 	ErrClientClosed = errors.New("client: closed")
 )
 
+// defaultPoolSize 单个节点的默认连接数。
+//
+// 直觉会想开大一点, 但连接本身支持请求复用, 一条连接就能承载高并发;
+// 连接开多了反而让每条连接上的在途请求变少, 读写都摊不到批量, 系统调用次数上升。
+// 实测(50 并发同步, 10s, 数据稳定可复现):
+//
+//	pool=1   154k QPS   P99 0.48ms
+//	pool=2   126k QPS   P99 0.59ms
+//	pool=4   111k QPS   P99 0.70ms
+//	pool=8   102k QPS   P99 0.80ms
+//	pool=16   93k QPS   P99 0.89ms
+//
+// 异步批量负载(100 并发 / batch 100)则偏好多连接(服务端按连接并行处理),
+// 但多次交错实测 pool=2 与 pool=8 的中位数是 121k 与 130k, 波动 ±15%,
+// 差异落在噪声里, 不足以支撑结论。
+//
+// 因此取 2: 同步路径拿到明显且可复现的收益, 异步路径不明显变差。
+// 单连接虽然同步最快, 但一条连接是单点, 且写入串行化, 留 2 条更稳妥
+const defaultPoolSize = 2
+
 // Client 一次调用的控制中心: 限流 → 服务发现 → 选址 → 熔断 → 取连接 → 组包 → 发包
 type Client struct {
 	reg     *registry.Registry       // 服务发现来源
@@ -66,7 +86,7 @@ func NewClient(reg *registry.Registry, opts ...ClientOption) (*Client, error) {
 		breakerWindow:      20,
 		breakerThreshold:   0.6,
 		breakerOpenTimeout: 5 * time.Second,
-		poolMaxActive:      8,
+		poolMaxActive:      defaultPoolSize,
 	}
 
 	for _, opt := range opts {

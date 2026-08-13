@@ -15,6 +15,7 @@ var (
 	etcdAddr  = flag.String("etcd", "localhost:2379", "etcd 地址")
 	advertise = flag.String("advertise", "localhost:9090", "注册到 etcd 的地址")
 	ttl       = flag.Int64("ttl", 10, "租约时间(秒)")
+	rate      = flag.Int("rate", 100000, "服务端限流速率(每秒令牌数)")
 )
 
 func main() {
@@ -28,7 +29,10 @@ func main() {
 	defer reg.Close()
 
 	// 2. 创建 RPC Server
-	srv, err := server.NewServer(*addr, server.WithServerCodec(codec.JSON))
+	srv, err := server.NewServer(*addr,
+		server.WithServerCodec(codec.JSON),
+		server.WithServerRateLimit(*rate),
+	)
 	if err != nil {
 		log.Fatalf("create server failed: %v", err)
 	}
