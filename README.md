@@ -10,7 +10,7 @@
 | --- | --- |
 | protocol | 自定义二进制协议 `Magic(2) + headerLen(4) + bodyLen(4) + Header + Body`，长度字段分帧 |
 | transport | TCP 长连接、粘包/半包处理、`requestId → Future` 多路复用、连接池（连接复用 + 请求复用） |
-| codec | JSON / Protobuf 可插拔注册工厂，gzip 压缩（只压 Body） |
+| codec | JSON / Protobuf 全链路可用，服务端按请求 Header 的 `CodecType` 选择编解码方式（一个服务端可同时服务两种客户端）；gzip 压缩（只压 Body，小包免压） |
 | client | 异步 `InvokeAsync`（Future）与同步 `Invoke`，超时控制，实例级熔断与连接池隔离 |
 | server | TCP 监听、One Connection One Goroutine、服务注册表 + 反射分发 |
 | registry | etcd 注册 + lease keepalive + watch 增量更新 + 本地缓存 |
@@ -135,6 +135,43 @@ go test -run XXX -bench . -benchtime 3s ./internal/...
 | 本实现，默认配置（池=1，与上游一致） | 198732（中位数，峰值 217563） | 0.45ms |
 
 同配置下吞吐约 **18.8 倍**（按中位数）、P99 约 **22 倍**。上游摘掉限流后只从 9936 涨到 10576，说明限流并非其瓶颈 —— 真正的原因是服务端串行处理叠加每条消息都做 gzip，排队延迟累积到 4.7ms。
+
+## Protobuf
+
+编解码方式由请求 Header 的 `CodecType` 决定，**服务端按请求选择**、用同一种编码回响应，因此一个服务端可以同时服务 JSON 与 Protobuf 客户端，两端不需要事先约定。业务方法签名不变，框架里没有任何 Protobuf 特例：
+
+```go
+// 只是把请求/响应换成 protoc 生成的类型
+func (a *ArithPB) Add(args *pb.Args, reply *pb.Reply) error {
+	reply.Result = args.A + args.B
+	return nil
+}
+```
+
+```bash
+go run ./cmd/benchmark_duration -c 50 -d 10 -codec proto
+```
+
+改 `.proto` 后重新生成（需要 `protoc` 与 `protoc-gen-go`）：
+
+```bash
+protoc --go_out=. --go_opt=module=kamaRPC -I pkg/api/pb pkg/api/pb/arith.proto
+```
+
+### JSON 与 Protobuf 实测对比
+
+| 口径 | JSON | Protobuf |
+| --- | --- | --- |
+| 纯编解码，小包（2 个整数） | 273 ns，248 B，6 allocs | **77 ns，68 B，2 allocs（3.5×）** |
+| 纯编解码，大包（200 整数 + 1KB 文本） | 16824 ns，8094 B，17 allocs | **1400 ns，4688 B，4 allocs（12×）** |
+| Body 体积（`Args{1,2}`） | 13 字节 | **4 字节** |
+| 整包体积 | 120 字节 | 113 字节（仅 -6%） |
+| 端到端小包吞吐（50 并发 / 10s） | **约 195k QPS** | 约 188k QPS（慢 3~4%） |
+
+两个反直觉但有数据支撑的结论：
+
+1. **整包只小 6%**，因为 Header 用 JSON 编码（约 100 字节）后已经盖过了 Body 的差异 —— 想真正压体积得把 Header 也做成二进制，那是协议层面的改动。
+2. **小包场景端到端反而慢 3~4%**：整条链路 43% 的时间花在系统调用上，编解码本来就不是瓶颈；而 `pb.Args` 带 protoimpl 状态占 56 字节（`api.Args` 只有 16），服务端每个请求都要 `reflect.New` 一个更大的对象，这点开销盖过了编解码的收益。Protobuf 的价值要到**大包**（12 倍）和**跨网络省带宽**时才体现出来。
 
 ## 测试
 
