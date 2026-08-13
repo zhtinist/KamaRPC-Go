@@ -8,7 +8,7 @@
 
 | 模块 | 能力 |
 | --- | --- |
-| protocol | 自定义二进制协议 `Magic(2) + headerLen(4) + bodyLen(4) + Header + Body`，长度字段分帧 |
+| protocol | 自定义二进制协议 `Magic(2) + headerLen(4) + bodyLen(4) + Header + Body`，长度字段分帧；Header 为二进制编码（v2），按 Magic 兼容 v1 的 JSON Header |
 | transport | TCP 长连接、粘包/半包处理、`requestId → Future` 多路复用、连接池（连接复用 + 请求复用） |
 | codec | JSON / Protobuf 全链路可用，服务端按请求 Header 的 `CodecType` 选择编解码方式（一个服务端可同时服务两种客户端）；gzip 压缩（只压 Body，小包免压） |
 | client | 异步 `InvokeAsync`（Future）与同步 `Invoke`，超时控制，实例级熔断与连接池隔离 |
@@ -105,7 +105,7 @@ go run ./cmd/benchmark_duration -c 50 -d 10
 
 ## 性能优化记录
 
-框架的第一个可用版本只有 17k QPS、P99 9.1ms，经过九轮基于 profile 的优化到现在的水平。每轮都有 benchmark 前后对比，`git log` 里记录了完整过程：
+框架的第一个可用版本只有 17k QPS、P99 9.1ms，经过十轮基于 profile 的优化到现在的水平。每轮都有 benchmark 前后对比，`git log` 里记录了完整过程：
 
 | 优化 | 手段 | 效果 |
 | --- | --- | --- |
@@ -117,6 +117,7 @@ go run ./cmd/benchmark_duration -c 50 -d 10
 | 并发写合并 + 流水线响应攒批 | 一条连接上的并发写用 leader 代写合并成一次 syscall（保留同步错误语义）；服务端仅在「下一个完整包已就位」时继续攒响应 | 同步 127.5k → 152.2k QPS（+19%），异步批量 +17%，并发慢方法 +22% |
 | 连接池默认值 8 → 2 → 1 | 连接的作用是分散到不同节点，单节点并发靠请求复用即可；实测决定吞吐的是「总连接数」，最优约 2 条，每节点 1 条时总数自然跟随实例数 | 同步 106k → 130k → 约 199k QPS（中位数），P99 0.79 → 0.45ms |
 | Header 解析零分配化 | 字段名改为 `switch string(key)`（编译器不分配）；服务名/方法名字符串驻留；`invoke` 返回 reply 指针而非装箱结构体 | 单次调用 1534B/42 allocs → 1349B/27 allocs；吞吐在噪声内 |
+| Header 二进制编码（协议 v2） | uvarint + 长度前缀取代 JSON；用第二个 Magic 区分版本，仍认老对端的 JSON Header | Header 101 → 15 字节，整包 124 → 38 字节（-69%）；协议层 170.5 → 88.3 ns（1.93×）；异步批量 143.7k → 229.8k QPS（+60%） |
 
 复跑方式：
 
@@ -158,6 +159,17 @@ go run ./cmd/benchmark_duration -c 50 -d 10 -codec proto
 protoc --go_out=. --go_opt=module=kamaRPC -I pkg/api/pb pkg/api/pb/arith.proto
 ```
 
+### 协议版本与兼容
+
+Header 有两种编码，用 Magic 区分，收包时按 Magic 分派，因此升级不需要两端同时上线：
+
+| Magic | 版本 | Header 编码 | 说明 |
+| --- | --- | --- | --- |
+| `0x4B52` "KR" | v1 | JSON | 教程原始设计，仍可解析 |
+| `0x4B53` "KS" | v2 | 二进制 | 当前默认，Header 101 → 15 字节 |
+
+分帧字段（`headerLen`/`bodyLen`）布局与版本无关，所以拆包逻辑对两种格式通用。v2 的扩展方式是**在 Header 尾部追加字段**：`headerLen` 已经给出总长度，老版本读完已知字段后忽略剩余字节，不需要再改 Magic。
+
 ### JSON 与 Protobuf 实测对比
 
 | 口径 | JSON | Protobuf |
@@ -165,12 +177,12 @@ protoc --go_out=. --go_opt=module=kamaRPC -I pkg/api/pb pkg/api/pb/arith.proto
 | 纯编解码，小包（2 个整数） | 273 ns，248 B，6 allocs | **77 ns，68 B，2 allocs（3.5×）** |
 | 纯编解码，大包（200 整数 + 1KB 文本） | 16824 ns，8094 B，17 allocs | **1400 ns，4688 B，4 allocs（12×）** |
 | Body 体积（`Args{1,2}`） | 13 字节 | **4 字节** |
-| 整包体积 | 120 字节 | 113 字节（仅 -6%） |
+| 整包体积（二进制 Header 下） | 37 字节 | **30 字节（-19%）** |
 | 端到端小包吞吐（50 并发 / 10s） | **约 195k QPS** | 约 188k QPS（慢 3~4%） |
 
 两个反直觉但有数据支撑的结论：
 
-1. **整包只小 6%**，因为 Header 用 JSON 编码（约 100 字节）后已经盖过了 Body 的差异 —— 想真正压体积得把 Header 也做成二进制，那是协议层面的改动。
+1. **Header 编码方式决定了 Body 优化的上限**：Header 还是 JSON 时，整包只小 6%（120 → 113 字节），Body 省下的 9 字节被 100 字节的 Header 淹没；把 Header 换成二进制之后，同样的 Body 差异变成整包 **-19%**（37 → 30 字节）。先解决占大头的那部分，另一项优化才显得出来。
 2. **小包场景端到端反而慢 3~4%**：整条链路 43% 的时间花在系统调用上，编解码本来就不是瓶颈；而 `pb.Args` 带 protoimpl 状态占 56 字节（`api.Args` 只有 16），服务端每个请求都要 `reflect.New` 一个更大的对象，这点开销盖过了编解码的收益。Protobuf 的价值要到**大包**（12 倍）和**跨网络省带宽**时才体现出来。
 
 ## 测试
