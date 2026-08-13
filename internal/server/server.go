@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"kamaRPC/internal/codec"
 	"kamaRPC/internal/limiter"
@@ -124,9 +126,34 @@ func (s *Server) Start() error {
 	}
 }
 
-// Handle 单连接的读-限流-处理循环
+// MaxConcurrentRequestsPerConn 单连接最大并发处理请求数。
+// 客户端支持请求复用(一条连接上并发多个请求), 服务端串行处理会让吞吐被
+// 最慢的方法卡住; 但也不能无限开协程, 所以用信号量封顶
+const MaxConcurrentRequestsPerConn = 256
+
+// dispatchThreshold 业务方法平均耗时超过这个值才值得切协程并发处理。
+// 切协程本身要付调度与缓存局部性的代价(实测约几微秒), 对于只花几微秒的
+// 方法, 并发处理是净亏损; 对于毫秒级方法, 串行处理会把单连接吞吐压到 1/耗时
+const dispatchThreshold = 50 * time.Microsecond
+
+// Handle 单连接的读-限流-分发循环。
+//
+// 读包与限流在本协程串行完成(保证按到达顺序处理)。业务调用是否切协程, 取决于
+// 这条连接上业务方法的平均耗时: 微秒级方法内联执行, 不付调度开销; 毫秒级方法
+// 切协程, 避免一个慢调用堵住整条连接的读取。
+// 响应写回由 TCPConnection 的写锁保证不会交错
 func (s *Server) Handle(conn *transport.TCPConnection) {
 	defer conn.Close()
+
+	var wg sync.WaitGroup
+	// 连接退出前等在途请求写完响应, 避免响应丢失
+	defer wg.Wait()
+
+	var (
+		sem       = make(chan struct{}, MaxConcurrentRequestsPerConn)
+		avgCost   int64 // 本连接业务方法耗时的滑动平均(纳秒)
+		threshold = int64(dispatchThreshold)
+	)
 
 	for {
 		msg, err := conn.Read()
@@ -147,8 +174,34 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 			continue
 		}
 
-		s.handler.Process(conn, msg, service)
+		// 只有慢方法才值得切协程
+		if atomic.LoadInt64(&avgCost) > threshold {
+			// 并发上限满了就在这里阻塞, 相当于对读取端反压
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(msg *protocol.Message, service interface{}) {
+				defer func() {
+					<-sem
+					wg.Done()
+				}()
+				s.processAndRecord(conn, msg, service, &avgCost)
+			}(msg, service)
+			continue
+		}
+
+		s.processAndRecord(conn, msg, service, &avgCost)
 	}
+}
+
+// processAndRecord 执行调用并把耗时并入滑动平均, 供分发策略参考
+func (s *Server) processAndRecord(conn *transport.TCPConnection, msg *protocol.Message, service interface{}, avgCost *int64) {
+	start := time.Now()
+	s.handler.Process(conn, msg, service)
+	cost := int64(time.Since(start))
+
+	// EWMA, α = 1/8; 并发更新只要求近似, 不需要严格原子读改写
+	old := atomic.LoadInt64(avgCost)
+	atomic.StoreInt64(avgCost, old-old/8+cost/8)
 }
 
 func (s *Server) writeError(conn *transport.TCPConnection, requestID uint64, msg string) {
