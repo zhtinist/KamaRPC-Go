@@ -29,7 +29,7 @@ var (
 	// 客户端限流默认 10000 QPS, 压测时会成为瓶颈,
 	// 所以这里默认放开, 想压限流本身就把它调小
 	rate     = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
-	poolSize = flag.Int("pool", 2, "单个目标节点的连接池大小")
+	poolSize = flag.Int("pool", 1, "单个目标节点的连接池大小")
 )
 
 type metrics struct {
