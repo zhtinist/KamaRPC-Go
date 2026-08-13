@@ -25,16 +25,6 @@ type Message struct {
 // 实际压缩方式由 Header.Compression 告知对端, 所以跳过压缩对协议是透明的
 const MinCompressSize = 512
 
-// Header 固定用 JSON 编码, 保证两端总能解出控制面信息。
-// 编解码器无状态, 建包时复用同一个实例, 避免每条消息都走一次注册表查找
-var headerCodec = func() codec.Codec {
-	c, err := codec.New(codec.JSON)
-	if err != nil {
-		panic("protocol: json codec must be registered: " + err.Error())
-	}
-	return c
-}()
-
 // DecodeHeaderLen 从字节切片解析 headerLen
 func DecodeHeaderLen(data []byte) uint32 {
 	return binary.BigEndian.Uint32(data)
@@ -72,24 +62,33 @@ func Encode(msg *Message) ([]byte, error) {
 	header := *msg.Header
 	header.Compression = compression
 
-	headerBytes, err := headerCodec.Marshal(&header)
+	// 一次性把整包拼进同一个缓冲区: 先占住固定头的位置, 直接把 Header JSON
+	// 与 Body 追加进去, 最后回填两个长度字段, 全程只分配一次
+	buf := make([]byte, HeaderFixedLen, HeaderFixedLen+maxHeaderJSONLen(&header)+len(bodyBytes))
+
+	buf, err := appendHeaderJSON(buf, &header)
 	if err != nil {
 		return nil, err
 	}
+	headerLen := len(buf) - HeaderFixedLen
 
-	headerLen := uint32(len(headerBytes))
-	bodyLen := uint32(len(bodyBytes))
-
-	total := HeaderFixedLen + int(headerLen) + int(bodyLen)
-	buf := make([]byte, total)
+	buf = append(buf, bodyBytes...)
 
 	binary.BigEndian.PutUint16(buf[0:2], Magic)
-	binary.BigEndian.PutUint32(buf[2:6], headerLen)
-	binary.BigEndian.PutUint32(buf[6:10], bodyLen)
-	copy(buf[HeaderFixedLen:], headerBytes)
-	copy(buf[HeaderFixedLen+headerLen:], bodyBytes)
+	binary.BigEndian.PutUint32(buf[2:6], uint32(headerLen))
+	binary.BigEndian.PutUint32(buf[6:10], uint32(len(bodyBytes)))
 
 	return buf, nil
+}
+
+// headerJSONOverhead 是 Header JSON 里除三个字符串内容之外的最大长度:
+// 字段名与标点约 90 字节, 加上 RequestID(20) 与两个 uint8(各 3)
+const headerJSONOverhead = 128
+
+// maxHeaderJSONLen 估算 Header 编码后的上界, 用于一次性预留容量。
+// 需要转义时实际会更长, 那种情况下 append 自行扩容, 不影响正确性
+func maxHeaderJSONLen(h *Header) int {
+	return headerJSONOverhead + len(h.ServiceName) + len(h.MethodName) + len(h.Error)
 }
 
 // Decode 把一个完整包的字节数组还原成 Message
@@ -114,7 +113,7 @@ func Decode(data []byte) (*Message, error) {
 
 	headerBytes := data[HeaderFixedLen : HeaderFixedLen+int(headerLen)]
 	var header Header
-	if err := headerCodec.Unmarshal(headerBytes, &header); err != nil {
+	if err := parseHeaderJSON(headerBytes, &header); err != nil {
 		return nil, err
 	}
 
