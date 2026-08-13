@@ -40,9 +40,15 @@ func main() {
 	if err := srv.Register("Arith", &api.Arith{}); err != nil {
 		log.Fatalf("register Arith failed: %v", err)
 	}
+	// 同名服务的 Protobuf 版本, 编解码方式由请求 Header 决定
+	if err := srv.Register("ArithPB", &api.ArithPB{}); err != nil {
+		log.Fatalf("register ArithPB failed: %v", err)
+	}
 
-	if err := reg.Register("Arith", registry.Instance{Addr: *advertise}, *ttl); err != nil {
-		log.Fatalf("register Arith to etcd failed: %v", err)
+	for _, service := range []string{"Arith", "ArithPB"} {
+		if err := reg.Register(service, registry.Instance{Addr: *advertise}, *ttl); err != nil {
+			log.Fatalf("register %s to etcd failed: %v", service, err)
+		}
 	}
 
 	log.Printf("server2 listening on %s, advertise %s", *addr, *advertise)

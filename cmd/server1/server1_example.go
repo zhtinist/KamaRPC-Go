@@ -41,13 +41,17 @@ func main() {
 	if err := srv.Register("Arith", &api.Arith{}); err != nil {
 		log.Fatalf("register Arith failed: %v", err)
 	}
+	// 同名服务的 Protobuf 版本, 编解码方式由请求 Header 决定
+	if err := srv.Register("ArithPB", &api.ArithPB{}); err != nil {
+		log.Fatalf("register ArithPB failed: %v", err)
+	}
 	if err := srv.Register("Arith2", &api.Arith2{}); err != nil {
 		log.Fatalf("register Arith2 failed: %v", err)
 	}
 
 	// 4. 把自身地址写入 etcd, 供客户端发现
 	ins := registry.Instance{Addr: *advertise}
-	for _, service := range []string{"Arith", "Arith2"} {
+	for _, service := range []string{"Arith", "Arith2", "ArithPB"} {
 		if err := reg.Register(service, ins, *ttl); err != nil {
 			log.Fatalf("register %s to etcd failed: %v", service, err)
 		}

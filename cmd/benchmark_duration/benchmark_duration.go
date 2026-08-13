@@ -18,13 +18,15 @@ import (
 	"kamaRPC/internal/codec"
 	"kamaRPC/internal/registry"
 	"kamaRPC/pkg/api"
+	"kamaRPC/pkg/api/pb"
 )
 
 var (
 	concurrency = flag.Int("c", 50, "并发客户端数量")
 	durationSec = flag.Int("d", 10, "基准测试持续时间（单位为秒）")
 	etcdAddr    = flag.String("etcd", "localhost:2379", "etcd的地址")
-	serviceName = flag.String("s", "Arith", "服务名")
+	serviceName = flag.String("s", "", "服务名(默认 JSON 用 Arith, proto 用 ArithPB)")
+	codecName   = flag.String("codec", "json", "编解码方式: json 或 proto")
 	methodName  = flag.String("m", "Add", "方法名")
 	// 客户端限流默认 10000 QPS, 压测时会成为瓶颈,
 	// 所以这里默认放开, 想压限流本身就把它调小
@@ -49,8 +51,10 @@ func (m *metrics) recordLatency(us int64) {
 func main() {
 	flag.Parse()
 
-	log.Printf("Starting benchmark: concurrency=%d duration=%ds\n",
-		*concurrency, *durationSec)
+	codecType, service := resolveCodec(*codecName, *serviceName)
+
+	log.Printf("Starting benchmark: concurrency=%d duration=%ds codec=%s service=%s\n",
+		*concurrency, *durationSec, *codecName, service)
 
 	reg, err := registry.NewRegistry([]string{*etcdAddr})
 	if err != nil {
@@ -60,7 +64,7 @@ func main() {
 
 	c, err := client.NewClient(
 		reg,
-		client.WithClientCodec(codec.JSON),
+		client.WithClientCodec(codecType),
 		client.WithClientRateLimit(*rate),
 		client.WithClientPoolSize(*poolSize),
 	)
@@ -91,13 +95,12 @@ func main() {
 				case <-ctx.Done():
 					return
 				default:
-					args := &api.Args{A: 1, B: 2}
-					reply := &api.Reply{}
+					args, reply := newArgsReply(codecType)
 
 					reqStart := time.Now()
 					err := c.Invoke(
 						context.Background(),
-						*serviceName,
+						service,
 						*methodName,
 						args,
 						reply,
@@ -123,6 +126,33 @@ func main() {
 	wg.Wait()
 
 	printStats(&m, time.Since(start))
+}
+
+// resolveCodec 解析 -codec, 并给出对应的默认服务名
+func resolveCodec(name, service string) (codec.Type, string) {
+	switch name {
+	case "proto", "protobuf":
+		if service == "" {
+			service = "ArithPB"
+		}
+		return codec.Protobuf, service
+	case "json":
+		if service == "" {
+			service = "Arith"
+		}
+		return codec.JSON, service
+	default:
+		log.Fatalf("unknown codec %q, want json or proto", name)
+		return 0, ""
+	}
+}
+
+// newArgsReply 按编解码方式构造请求与响应结构体
+func newArgsReply(t codec.Type) (interface{}, interface{}) {
+	if t == codec.Protobuf {
+		return &pb.Args{A: 1, B: 2}, &pb.Reply{}
+	}
+	return &api.Args{A: 1, B: 2}, &api.Reply{}
 }
 
 func printStats(m *metrics, duration time.Duration) {

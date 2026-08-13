@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "kamaRPC/pkg/api/pb";
+
+// Args 示例请求, 与 api.Args 对应
+message Args {
+  int64 a = 1;
+  int64 b = 2;
+}
+
+// Reply 示例响应, 与 api.Reply 对应
+message Reply {
+  int64 result = 1;
+}
+
+// Big 用于对比大包场景下两种编码的开销差异
+message Big {
+  repeated int64 values = 1;
+  string text = 2;
+}

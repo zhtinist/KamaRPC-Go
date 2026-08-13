@@ -47,12 +47,27 @@ var respBufPool = sync.Pool{
 	},
 }
 
+// codecFor 按请求声明的 CodecType 选择编解码器, 未声明或不认识时用服务端默认值。
+//
+// 这样一个服务端可以同时服务 JSON 与 Protobuf 客户端, 不需要两端事先约定;
+// 响应也用同一种编码回去, 客户端才解得开
+func (h *Handler) codecFor(t codec.Type) codec.Codec {
+	if t != 0 {
+		if c, ok := codec.Get(t); ok {
+			return c
+		}
+	}
+	return h.codec
+}
+
 // AppendResponse 调用本地方法并把编码好的响应追加到 dst。
 //
 // 与直接写回相比, 这样可以把多个流水线请求的响应攒在一起、一次写出,
 // 把 N 次 write 系统调用压成 1 次
 func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *serviceEntry) []byte {
-	result, err := h.invoke(service, msg.Header.MethodName, msg.Body)
+	c := h.codecFor(msg.Header.CodecType)
+
+	result, err := h.invoke(c, service, msg.Header.MethodName, msg.Body)
 	if err != nil {
 		return AppendErrorResponse(dst, msg.Header.RequestID, err.Error())
 	}
@@ -60,7 +75,7 @@ func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *ser
 	var body []byte
 	if result != nil {
 		var marshalErr error
-		body, marshalErr = h.codec.Marshal(result)
+		body, marshalErr = c.Marshal(result)
 		if marshalErr != nil {
 			log.Println("marshal error:", marshalErr)
 			return AppendErrorResponse(dst, msg.Header.RequestID, marshalErr.Error())
@@ -70,7 +85,7 @@ func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *ser
 	resp := &protocol.Message{
 		Header: &protocol.Header{
 			RequestID:   msg.Header.RequestID,
-			CodecType:   h.codec.Type(),
+			CodecType:   c.Type(),
 			Compression: codec.CompressionGzip,
 		},
 		Body: body,
@@ -105,7 +120,7 @@ func AppendErrorResponse(dst []byte, requestID uint64, errMsg string) []byte {
 // invoke 按方法名动态调用本地方法。
 // 方法查找与签名校验在注册时已经完成, 这里只做: 查表 → 构造 req/reply →
 // 反序列化 → 反射调用 → 返回 reply
-func (h *Handler) invoke(service *serviceEntry, methodName string, body []byte) (interface{}, error) {
+func (h *Handler) invoke(c codec.Codec, service *serviceEntry, methodName string, body []byte) (interface{}, error) {
 	method, ok := service.lookup(methodName)
 	if !ok {
 		return nil, fmt.Errorf("method not found: %s.%s", service.name, methodName)
@@ -114,7 +129,7 @@ func (h *Handler) invoke(service *serviceEntry, methodName string, body []byte) 
 	// 动态构造 req 并反序列化请求数据
 	req := reflect.New(method.reqType)
 	if len(body) > 0 {
-		if err := h.codec.Unmarshal(body, req.Interface()); err != nil {
+		if err := c.Unmarshal(body, req.Interface()); err != nil {
 			return nil, err
 		}
 	}
