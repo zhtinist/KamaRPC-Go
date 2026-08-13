@@ -11,9 +11,11 @@ import (
 // BufferSize 单次 socket 读取的大小, 同时作为 bufio.Reader 的缓冲大小
 const BufferSize = 4096
 
-// PacketBuffer 累积 socket 读到的碎片数据, 用来解决粘包/半包
+// PacketBuffer 累积 socket 读到的碎片数据, 用来解决粘包/半包。
+// 有效数据是 buf[off:], 用读偏移代替切片前移, 底层数组可以一直复用
 type PacketBuffer struct {
 	buf  []byte
+	off  int
 	lock sync.Mutex
 }
 
@@ -22,30 +24,44 @@ func (pb *PacketBuffer) Read() []byte {
 	pb.lock.Lock()
 	defer pb.lock.Unlock()
 
+	data := pb.buf[pb.off:]
+
 	// 最小包头长度校验
-	if len(pb.buf) < protocol.HeaderFixedLen {
+	if len(data) < protocol.HeaderFixedLen {
 		return nil
 	}
 
-	headerLen := int(protocol.DecodeHeaderLen(pb.buf[2:6]))
-	bodyLen := int(protocol.DecodeBodyLen(pb.buf[6:10]))
+	headerLen := int(protocol.DecodeHeaderLen(data[2:6]))
+	bodyLen := int(protocol.DecodeBodyLen(data[6:10]))
 	totalLen := protocol.HeaderFixedLen + headerLen + bodyLen
 
-	if len(pb.buf) < totalLen {
+	if len(data) < totalLen {
 		return nil
 	}
 
+	// 必须拷贝: 返回的包会被 Decode 解出 Body 交给 Future 异步持有,
+	// 直接引用共享缓冲区会被后续写入覆盖
 	packet := make([]byte, totalLen)
-	copy(packet, pb.buf[:totalLen])
+	copy(packet, data[:totalLen])
 
-	// 移动窗口, 丢掉已经消费的字节
-	pb.buf = pb.buf[totalLen:]
+	// 移动读偏移; 全部消费完则直接复位, 复用底层数组
+	pb.off += totalLen
+	if pb.off == len(pb.buf) {
+		pb.buf = pb.buf[:0]
+		pb.off = 0
+	}
 	return packet
 }
 
 // Write 把新从 socket 读到的字节追加进缓冲区
 func (pb *PacketBuffer) Write(data []byte) {
 	pb.lock.Lock()
+	// 追加会超出容量时, 先把已消费的前缀挤掉, 尽量避免重新分配
+	if pb.off > 0 && len(pb.buf)+len(data) > cap(pb.buf) {
+		n := copy(pb.buf, pb.buf[pb.off:])
+		pb.buf = pb.buf[:n]
+		pb.off = 0
+	}
 	pb.buf = append(pb.buf, data...)
 	pb.lock.Unlock()
 }
@@ -56,6 +72,7 @@ type TCPConnection struct {
 	conn    net.Conn      // 操作系统 TCP
 	reader  *bufio.Reader // 带缓冲读取, 减少系统调用
 	buffer  *PacketBuffer // 解决粘包/半包
+	readBuf []byte        // 复用的读暂存区, 见 Read 的单协程约定
 	writeMu sync.Mutex    // 保证一条消息完整写入, 避免字节交叉
 }
 
@@ -67,10 +84,15 @@ func NewTCPConnection(conn net.Conn) *TCPConnection {
 		buffer: &PacketBuffer{
 			buf: make([]byte, 0, BufferSize*2),
 		},
+		readBuf: make([]byte, BufferSize),
 	}
 }
 
-// Read 不断读取数据, 直到拼出一个完整协议包
+// Read 不断读取数据, 直到拼出一个完整协议包。
+//
+// 约定: 单个连接的 Read 只由一个协程调用(客户端是 readLoop, 服务端是 Handle),
+// 因此 readBuf 可以在多次读取间复用 —— 读到的字节会立刻拷进 PacketBuffer,
+// 不会有引用逃逸出去
 func (tc *TCPConnection) Read() (*protocol.Message, error) {
 	for {
 		// 先看缓冲区里有没有完整的一条消息
@@ -78,10 +100,9 @@ func (tc *TCPConnection) Read() (*protocol.Message, error) {
 			return protocol.Decode(packet)
 		}
 
-		tmp := make([]byte, BufferSize)
-		n, err := tc.reader.Read(tmp)
+		n, err := tc.reader.Read(tc.readBuf)
 		if n > 0 {
-			tc.buffer.Write(tmp[:n])
+			tc.buffer.Write(tc.readBuf[:n])
 		}
 		if err != nil {
 			return nil, err

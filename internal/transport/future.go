@@ -20,12 +20,20 @@ type Future struct {
 	completed  bool
 }
 
+// 编解码器无状态, 包级复用一份, 避免每个 Future 都走一次注册表查找
+var defaultCodec = func() codec.Codec {
+	c, err := codec.New(codec.JSON)
+	if err != nil {
+		panic("transport: json codec must be registered: " + err.Error())
+	}
+	return c
+}()
+
 // NewFuture 创建一个未完成的 Future, 默认使用 JSON 解码结果
 func NewFuture() *Future {
-	c, _ := codec.New(codec.JSON)
 	return &Future{
 		done:  make(chan struct{}),
-		codec: c,
+		codec: defaultCodec,
 	}
 }
 

@@ -13,11 +13,11 @@ import (
 	"kamaRPC/pkg/api"
 )
 
-// startTestServer 起一个不依赖 etcd 的服务端, 直接用 transport 层压测调用链路
-func startTestServer(t *testing.T) (*Server, string) {
+// startTestServer 起一个不依赖 etcd 的服务端, 直接用 transport 层驱动调用链路
+func startTestServer(t testing.TB, opts ...ServerOption) (*Server, string) {
 	t.Helper()
 
-	srv, err := NewServer("127.0.0.1:0", WithServerCodec(codec.JSON))
+	srv, err := NewServer("127.0.0.1:0", append([]ServerOption{WithServerCodec(codec.JSON)}, opts...)...)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
