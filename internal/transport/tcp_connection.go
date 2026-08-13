@@ -110,12 +110,34 @@ func (tc *TCPConnection) Read() (*protocol.Message, error) {
 	}
 }
 
+// maxPooledWriteBuf 超过这个容量的写缓冲不再放回池子,
+// 避免个别大包把大块内存长期留在池里
+const maxPooledWriteBuf = 64 << 10
+
+// 写缓冲池: 编码在写锁之外完成, 所以用池而不是连接内的固定缓冲,
+// 这样同一连接上的并发写(服务端并发处理时)仍可各自编码
+var writeBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, BufferSize)
+		return &buf
+	},
+}
+
 // Write 编码并完整写入一条消息
 func (tc *TCPConnection) Write(msg *protocol.Message) error {
-	data, err := protocol.Encode(msg)
+	bufp := writeBufPool.Get().(*[]byte)
+	data, err := protocol.AppendEncoded((*bufp)[:0], msg)
 	if err != nil {
+		writeBufPool.Put(bufp)
 		return err
 	}
+	// 记住扩容后的切片, 下次复用更大的容量
+	*bufp = data
+	defer func() {
+		if cap(*bufp) <= maxPooledWriteBuf {
+			writeBufPool.Put(bufp)
+		}
+	}()
 
 	// 请求复用 + TCP 流式的双重原因: 必须整条消息串行写入,
 	// 否则会出现 ABAB 交错, 而不是预期的 AABB

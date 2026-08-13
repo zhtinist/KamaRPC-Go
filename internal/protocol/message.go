@@ -37,6 +37,12 @@ func DecodeBodyLen(data []byte) uint32 {
 
 // Encode 把 Message 编成可以直接写到 TCP 上的字节数组
 func Encode(msg *Message) ([]byte, error) {
+	return AppendEncoded(nil, msg)
+}
+
+// AppendEncoded 把编码结果追加到 dst 并返回扩展后的切片,
+// 便于调用方复用缓冲区(见 transport 的写缓冲池), 避免每条消息都分配
+func AppendEncoded(dst []byte, msg *Message) ([]byte, error) {
 	// 没有 Header 就不知道请求信息, 必须要求不为空
 	if msg.Header == nil {
 		return nil, fmt.Errorf("protocol: header is nil")
@@ -63,23 +69,35 @@ func Encode(msg *Message) ([]byte, error) {
 	header.Compression = compression
 
 	// 一次性把整包拼进同一个缓冲区: 先占住固定头的位置, 直接把 Header JSON
-	// 与 Body 追加进去, 最后回填两个长度字段, 全程只分配一次
-	buf := make([]byte, HeaderFixedLen, HeaderFixedLen+maxHeaderJSONLen(&header)+len(bodyBytes))
+	// 与 Body 追加进去, 最后回填两个长度字段, 不需要中间缓冲
+	base := len(dst)
+	need := HeaderFixedLen + maxHeaderJSONLen(&header) + len(bodyBytes)
+	if cap(dst)-base < need {
+		grown := make([]byte, base, base+need)
+		copy(grown, dst)
+		dst = grown
+	}
+
+	buf := append(dst, fixedHeaderPlaceholder[:]...)
 
 	buf, err := appendHeaderJSON(buf, &header)
 	if err != nil {
 		return nil, err
 	}
-	headerLen := len(buf) - HeaderFixedLen
+	headerLen := len(buf) - base - HeaderFixedLen
 
 	buf = append(buf, bodyBytes...)
 
-	binary.BigEndian.PutUint16(buf[0:2], Magic)
-	binary.BigEndian.PutUint32(buf[2:6], uint32(headerLen))
-	binary.BigEndian.PutUint32(buf[6:10], uint32(len(bodyBytes)))
+	fixed := buf[base : base+HeaderFixedLen]
+	binary.BigEndian.PutUint16(fixed[0:2], Magic)
+	binary.BigEndian.PutUint32(fixed[2:6], uint32(headerLen))
+	binary.BigEndian.PutUint32(fixed[6:10], uint32(len(bodyBytes)))
 
 	return buf, nil
 }
+
+// fixedHeaderPlaceholder 用来先占住固定头的位置, 长度字段最后回填
+var fixedHeaderPlaceholder [HeaderFixedLen]byte
 
 // headerJSONOverhead 是 Header JSON 里除三个字符串内容之外的最大长度:
 // 字段名与标点约 90 字节, 加上 RequestID(20) 与两个 uint8(各 3)

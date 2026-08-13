@@ -19,8 +19,8 @@ import (
 // netpoll(epoll/kqueue) 与 M:N 调度, 相当于 Go 风格的 Reactor 封装
 type Server struct {
 	addr     string
-	services map[string]interface{} // serviceName -> 实例, 分发靠反射
-	limiter  *limiter.TokenBucket   // 服务端限流, 保护自己
+	services map[string]*serviceEntry // serviceName -> 方法表, 注册时解析好反射信息
+	limiter  *limiter.TokenBucket     // 服务端限流, 保护自己
 	listener net.Listener
 	handler  *Handler
 	codec    codec.Codec
@@ -40,7 +40,7 @@ func NewServer(addr string, opts ...ServerOption) (*Server, error) {
 
 	s := &Server{
 		addr:     addr,
-		services: make(map[string]interface{}),
+		services: make(map[string]*serviceEntry),
 		limiter:  limiter.NewTokenBucket(100000),
 		codec:    defaultCodec,
 		conns:    make(map[*transport.TCPConnection]struct{}),
@@ -57,21 +57,28 @@ func NewServer(addr string, opts ...ServerOption) (*Server, error) {
 	return s, nil
 }
 
-// Register 注册服务实例, 真正的方法分发在调用时由反射完成
+// Register 注册服务实例。方法查找与签名校验在这里一次性完成并缓存成方法表,
+// 调用时不必再 MethodByName; 签名写错也能在启动阶段就发现
 func (s *Server) Register(name string, service interface{}) error {
 	if name == "" || service == nil {
 		return errors.New("server: invalid service registration")
 	}
+
+	entry, err := newServiceEntry(name, service)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.services[name]; ok {
 		return errors.New("server: service already registered: " + name)
 	}
-	s.services[name] = service
+	s.services[name] = entry
 	return nil
 }
 
-func (s *Server) lookup(name string) (interface{}, bool) {
+func (s *Server) lookup(name string) (*serviceEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	svc, ok := s.services[name]
@@ -179,7 +186,7 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 			// 并发上限满了就在这里阻塞, 相当于对读取端反压
 			sem <- struct{}{}
 			wg.Add(1)
-			go func(msg *protocol.Message, service interface{}) {
+			go func(msg *protocol.Message, service *serviceEntry) {
 				defer func() {
 					<-sem
 					wg.Done()
@@ -194,7 +201,7 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 }
 
 // processAndRecord 执行调用并把耗时并入滑动平均, 供分发策略参考
-func (s *Server) processAndRecord(conn *transport.TCPConnection, msg *protocol.Message, service interface{}, avgCost *int64) {
+func (s *Server) processAndRecord(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry, avgCost *int64) {
 	start := time.Now()
 	s.handler.Process(conn, msg, service)
 	cost := int64(time.Since(start))

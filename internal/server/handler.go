@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"reflect"
@@ -10,8 +9,6 @@ import (
 	"kamaRPC/internal/protocol"
 	"kamaRPC/internal/transport"
 )
-
-var errorType = reflect.TypeOf((*error)(nil)).Elem()
 
 // Handler 负责请求 Body 反序列化 + 反射调用 + 响应组装,
 // 与 Server 的网络/连接管理职责分离
@@ -25,14 +22,8 @@ func NewHandler(c codec.Codec) *Handler {
 }
 
 // Process 调用本地方法并把结果写回对端
-func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, service interface{}) {
-	result, err := h.invoke(
-		context.Background(),
-		service,
-		msg.Header.ServiceName,
-		msg.Header.MethodName,
-		msg.Body,
-	)
+func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry) {
+	result, err := h.invoke(service, msg.Header.MethodName, msg.Body)
 	if err != nil {
 		h.writeError(conn, msg.Header.RequestID, err.Error())
 		return
@@ -63,37 +54,17 @@ func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, 
 	}
 }
 
-// invoke 根据字符串方法名动态调用本地方法,
-// 目前支持 net/rpc 风格签名: func(req *Req, reply *Resp) error
-func (h *Handler) invoke(ctx context.Context, service interface{}, serviceName, methodName string, body []byte) (interface{}, error) {
-	// 拿到服务实例的反射对象
-	serviceValue := reflect.ValueOf(service)
-	if !serviceValue.IsValid() {
-		return nil, fmt.Errorf("service not found: %s", serviceName)
-	}
-
-	// 按方法名查找方法
-	method := serviceValue.MethodByName(methodName)
-	if !method.IsValid() {
-		return nil, fmt.Errorf("method not found: %s.%s", serviceName, methodName)
-	}
-
-	// 校验方法签名
-	methodType := method.Type()
-	numIn := methodType.NumIn()
-	numOut := methodType.NumOut()
-
-	if numIn != 2 ||
-		methodType.In(0).Kind() != reflect.Ptr ||
-		methodType.In(1).Kind() != reflect.Ptr ||
-		numOut != 1 ||
-		!methodType.Out(0).Implements(errorType) {
-		return nil, fmt.Errorf("unsupported method signature: %s.%s", serviceName, methodName)
+// invoke 按方法名动态调用本地方法。
+// 方法查找与签名校验在注册时已经完成, 这里只做: 查表 → 构造 req/reply →
+// 反序列化 → 反射调用 → 返回 reply
+func (h *Handler) invoke(service *serviceEntry, methodName string, body []byte) (interface{}, error) {
+	method, ok := service.lookup(methodName)
+	if !ok {
+		return nil, fmt.Errorf("method not found: %s.%s", service.name, methodName)
 	}
 
 	// 动态构造 req 并反序列化请求数据
-	reqType := methodType.In(0)
-	req := reflect.New(reqType.Elem())
+	req := reflect.New(method.reqType)
 	if len(body) > 0 {
 		if err := h.codec.Unmarshal(body, req.Interface()); err != nil {
 			return nil, err
@@ -101,13 +72,10 @@ func (h *Handler) invoke(ctx context.Context, service interface{}, serviceName, 
 	}
 
 	// 动态构造 reply
-	replyType := methodType.In(1)
-	reply := reflect.New(replyType.Elem())
+	reply := reflect.New(method.replyType)
 
-	// 反射调用
-	results := method.Call([]reflect.Value{req, reply})
-
-	// 返回值固定为 error
+	// 反射调用, 返回值固定为 error
+	results := method.fn.Call([]reflect.Value{req, reply})
 	if errVal := results[0].Interface(); errVal != nil {
 		return nil, errVal.(error)
 	}
