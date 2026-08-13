@@ -116,7 +116,7 @@ func TestCodecPacketSizes(t *testing.T) {
 	pbTotal := pack("ArithPB", pbBody, codec.Protobuf)
 
 	t.Logf("Body:  JSON %d 字节, Protobuf %d 字节", len(jsonBody), len(pbBody))
-	t.Logf("整包:  JSON %d 字节, Protobuf %d 字节 (固定头 %d + JSON Header)",
+	t.Logf("整包:  JSON %d 字节, Protobuf %d 字节 (固定头 %d + 二进制 Header)",
 		jsonTotal, pbTotal, protocol.HeaderFixedLen)
 
 	if len(pbBody) >= len(jsonBody) {
