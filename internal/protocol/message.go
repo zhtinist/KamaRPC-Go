@@ -20,6 +20,21 @@ type Message struct {
 	Body   []byte
 }
 
+// MinCompressSize 低于这个长度的 Body 不压缩:
+// gzip 自身有 20 余字节固定开销, 小包压完通常更大, 而 CPU 与内存开销远高于收益。
+// 实际压缩方式由 Header.Compression 告知对端, 所以跳过压缩对协议是透明的
+const MinCompressSize = 512
+
+// Header 固定用 JSON 编码, 保证两端总能解出控制面信息。
+// 编解码器无状态, 建包时复用同一个实例, 避免每条消息都走一次注册表查找
+var headerCodec = func() codec.Codec {
+	c, err := codec.New(codec.JSON)
+	if err != nil {
+		panic("protocol: json codec must be registered: " + err.Error())
+	}
+	return c
+}()
+
 // DecodeHeaderLen 从字节切片解析 headerLen
 func DecodeHeaderLen(data []byte) uint32 {
 	return binary.BigEndian.Uint32(data)
@@ -38,21 +53,26 @@ func Encode(msg *Message) ([]byte, error) {
 	}
 
 	bodyBytes := msg.Body
-	// 压缩 Body(Header 不压缩)
-	if msg.Header.Compression != codec.CompressionNone {
+
+	// 压缩 Body(Header 不压缩), 小包直接跳过
+	compression := msg.Header.Compression
+	if compression != codec.CompressionNone && len(bodyBytes) < MinCompressSize {
+		compression = codec.CompressionNone
+	}
+	if compression != codec.CompressionNone {
 		var err error
-		bodyBytes, err = codec.Compress(bodyBytes, msg.Header.Compression)
+		bodyBytes, err = codec.Compress(bodyBytes, compression)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// Header 固定用 JSON 编码, 保证两端总能解出控制面信息
-	headerCodec, err := codec.New(codec.JSON)
-	if err != nil {
-		return nil, err
-	}
-	headerBytes, err := headerCodec.Marshal(msg.Header)
+	// 实际生效的压缩方式必须写进 Header, 否则对端会错误地尝试解压。
+	// 这里编码副本, 不改调用方持有的 Header
+	header := *msg.Header
+	header.Compression = compression
+
+	headerBytes, err := headerCodec.Marshal(&header)
 	if err != nil {
 		return nil, err
 	}
@@ -92,11 +112,6 @@ func Decode(data []byte) (*Message, error) {
 		return nil, fmt.Errorf("protocol: incomplete packet")
 	}
 
-	headerCodec, err := codec.New(codec.JSON)
-	if err != nil {
-		return nil, err
-	}
-
 	headerBytes := data[HeaderFixedLen : HeaderFixedLen+int(headerLen)]
 	var header Header
 	if err := headerCodec.Unmarshal(headerBytes, &header); err != nil {
@@ -105,6 +120,7 @@ func Decode(data []byte) (*Message, error) {
 
 	bodyBytes := data[HeaderFixedLen+int(headerLen) : totalLen]
 	if header.Compression != codec.CompressionNone {
+		var err error
 		bodyBytes, err = codec.Decompress(bodyBytes, header.Compression)
 		if err != nil {
 			return nil, err
