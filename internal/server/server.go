@@ -160,9 +160,20 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 		sem       = make(chan struct{}, MaxConcurrentRequestsPerConn)
 		avgCost   int64 // 本连接业务方法耗时的滑动平均(纳秒)
 		threshold = int64(dispatchThreshold)
+		respBuf   []byte // 攒批待写的响应
 	)
 
 	for {
+		// 只在"下一个请求还没到"时才把攒下的响应写出去。
+		// 缓冲区里已经躺着完整包, 说明下一次 Read 不会阻塞, 可以继续攒,
+		// 把流水线请求的多次 write 压成一次
+		if len(respBuf) > 0 && !conn.HasBufferedPacket() {
+			if err := conn.WriteRaw(respBuf); err != nil {
+				return
+			}
+			respBuf = respBuf[:0]
+		}
+
 		msg, err := conn.Read()
 		if err != nil {
 			// 连接关闭或出错, 退出
@@ -171,18 +182,26 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 
 		// 服务端限流
 		if !s.limiter.Allow() {
-			s.writeError(conn, msg.Header.RequestID, "rate limit exceeded")
+			respBuf = AppendErrorResponse(respBuf, msg.Header.RequestID, "rate limit exceeded")
 			continue
 		}
 
 		service, ok := s.lookup(msg.Header.ServiceName)
 		if !ok {
-			s.writeError(conn, msg.Header.RequestID, "service not found: "+msg.Header.ServiceName)
+			respBuf = AppendErrorResponse(respBuf, msg.Header.RequestID, "service not found: "+msg.Header.ServiceName)
 			continue
 		}
 
 		// 只有慢方法才值得切协程
 		if atomic.LoadInt64(&avgCost) > threshold {
+			// 慢方法交给协程后何时完成不确定, 不能让已攒的响应干等, 先写出去
+			if len(respBuf) > 0 {
+				if err := conn.WriteRaw(respBuf); err != nil {
+					return
+				}
+				respBuf = respBuf[:0]
+			}
+
 			// 并发上限满了就在这里阻塞, 相当于对读取端反压
 			sem <- struct{}{}
 			wg.Add(1)
@@ -196,8 +215,30 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 			continue
 		}
 
-		s.processAndRecord(conn, msg, service, &avgCost)
+		respBuf = s.appendAndRecord(respBuf, msg, service, &avgCost)
+
+		// 攒得太多先落盘, 避免占用过多内存, 也避免响应迟迟不回
+		if len(respBuf) >= maxBatchedResponseBytes {
+			if err := conn.WriteRaw(respBuf); err != nil {
+				return
+			}
+			respBuf = respBuf[:0]
+		}
 	}
+}
+
+// maxBatchedResponseBytes 攒批响应的上限, 超过就先写出去
+const maxBatchedResponseBytes = 64 << 10
+
+// appendAndRecord 执行调用并把响应追加到 buf, 同时把耗时并入滑动平均
+func (s *Server) appendAndRecord(dst []byte, msg *protocol.Message, service *serviceEntry, avgCost *int64) []byte {
+	start := time.Now()
+	out := s.handler.AppendResponse(dst, msg, service)
+	cost := int64(time.Since(start))
+
+	old := atomic.LoadInt64(avgCost)
+	atomic.StoreInt64(avgCost, old-old/8+cost/8)
+	return out
 }
 
 // processAndRecord 执行调用并把耗时并入滑动平均, 供分发策略参考
@@ -209,17 +250,6 @@ func (s *Server) processAndRecord(conn *transport.TCPConnection, msg *protocol.M
 	// EWMA, α = 1/8; 并发更新只要求近似, 不需要严格原子读改写
 	old := atomic.LoadInt64(avgCost)
 	atomic.StoreInt64(avgCost, old-old/8+cost/8)
-}
-
-func (s *Server) writeError(conn *transport.TCPConnection, requestID uint64, msg string) {
-	resp := &protocol.Message{
-		Header: &protocol.Header{
-			RequestID:   requestID,
-			Error:       msg,
-			Compression: codec.CompressionGzip,
-		},
-	}
-	_ = conn.Write(resp)
 }
 
 // Stop 优雅关闭: 停止 Accept 并关掉所有连接

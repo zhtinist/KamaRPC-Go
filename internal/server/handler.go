@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"sync"
 
 	"kamaRPC/internal/codec"
 	"kamaRPC/internal/protocol"
@@ -23,10 +24,37 @@ func NewHandler(c codec.Codec) *Handler {
 
 // Process 调用本地方法并把结果写回对端
 func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry) {
+	bufp := respBufPool.Get().(*[]byte)
+	buf := h.AppendResponse((*bufp)[:0], msg, service)
+	*bufp = buf
+
+	if err := conn.WriteRaw(buf); err != nil {
+		log.Println("write response error:", err)
+	}
+
+	if cap(*bufp) <= maxPooledRespBuf {
+		respBufPool.Put(bufp)
+	}
+}
+
+// maxPooledRespBuf 超过这个容量的响应缓冲不再回池
+const maxPooledRespBuf = 64 << 10
+
+var respBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 4096)
+		return &buf
+	},
+}
+
+// AppendResponse 调用本地方法并把编码好的响应追加到 dst。
+//
+// 与直接写回相比, 这样可以把多个流水线请求的响应攒在一起、一次写出,
+// 把 N 次 write 系统调用压成 1 次
+func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *serviceEntry) []byte {
 	result, err := h.invoke(service, msg.Header.MethodName, msg.Body)
 	if err != nil {
-		h.writeError(conn, msg.Header.RequestID, err.Error())
-		return
+		return AppendErrorResponse(dst, msg.Header.RequestID, err.Error())
 	}
 
 	var body []byte
@@ -35,8 +63,7 @@ func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, 
 		body, marshalErr = h.codec.Marshal(result)
 		if marshalErr != nil {
 			log.Println("marshal error:", marshalErr)
-			h.writeError(conn, msg.Header.RequestID, marshalErr.Error())
-			return
+			return AppendErrorResponse(dst, msg.Header.RequestID, marshalErr.Error())
 		}
 	}
 
@@ -49,9 +76,30 @@ func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, 
 		Body: body,
 	}
 
-	if err := conn.Write(resp); err != nil {
-		log.Println("write response error:", err)
+	out, encErr := protocol.AppendEncoded(dst, resp)
+	if encErr != nil {
+		log.Println("encode response error:", encErr)
+		return AppendErrorResponse(dst, msg.Header.RequestID, encErr.Error())
 	}
+	return out
+}
+
+// AppendErrorResponse 把一条只带错误信息的响应追加到 dst
+func AppendErrorResponse(dst []byte, requestID uint64, errMsg string) []byte {
+	resp := &protocol.Message{
+		Header: &protocol.Header{
+			RequestID:   requestID,
+			Error:       errMsg,
+			Compression: codec.CompressionGzip,
+		},
+	}
+	out, err := protocol.AppendEncoded(dst, resp)
+	if err != nil {
+		// 只带错误信息的响应编不出来说明协议层出了问题, 这里只能放弃这条响应
+		log.Println("encode error response failed:", err)
+		return dst
+	}
+	return out
 }
 
 // invoke 按方法名动态调用本地方法。
@@ -81,17 +129,4 @@ func (h *Handler) invoke(service *serviceEntry, methodName string, body []byte) 
 	}
 
 	return reply.Elem().Interface(), nil
-}
-
-func (h *Handler) writeError(conn *transport.TCPConnection, requestID uint64, errMsg string) {
-	resp := &protocol.Message{
-		Header: &protocol.Header{
-			RequestID:   requestID,
-			Error:       errMsg,
-			Compression: codec.CompressionGzip,
-		},
-	}
-	if err := conn.Write(resp); err != nil {
-		log.Println("write error response failed:", err)
-	}
 }

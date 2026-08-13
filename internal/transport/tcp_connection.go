@@ -53,6 +53,21 @@ func (pb *PacketBuffer) Read() []byte {
 	return packet
 }
 
+// HasPacket 只判断缓冲区里是否已经攒够一个完整包, 不消费数据
+func (pb *PacketBuffer) HasPacket() bool {
+	pb.lock.Lock()
+	defer pb.lock.Unlock()
+
+	data := pb.buf[pb.off:]
+	if len(data) < protocol.HeaderFixedLen {
+		return false
+	}
+
+	headerLen := int(protocol.DecodeHeaderLen(data[2:6]))
+	bodyLen := int(protocol.DecodeBodyLen(data[6:10]))
+	return len(data) >= protocol.HeaderFixedLen+headerLen+bodyLen
+}
+
 // Write 把新从 socket 读到的字节追加进缓冲区
 func (pb *PacketBuffer) Write(data []byte) {
 	pb.lock.Lock()
@@ -160,6 +175,21 @@ func (tc *TCPConnection) Write(msg *protocol.Message) error {
 	// 记住扩容后的切片, 下次复用更大的容量
 	*bufp = data
 
+	writeErr := tc.WriteRaw(data)
+
+	if cap(*bufp) <= maxPooledWriteBuf {
+		writeBufPool.Put(bufp)
+	}
+	return writeErr
+}
+
+// WriteRaw 写入已经编码好的字节(可以是多条消息拼在一起)。
+// 返回后调用方即可复用自己的缓冲: 走批次时数据已拷贝, 走快路径时已写完
+func (tc *TCPConnection) WriteRaw(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+
 	tc.writeMu.Lock()
 
 	// 已经有协程在写: 把自己并进批次, 等它代写
@@ -172,11 +202,6 @@ func (tc *TCPConnection) Write(msg *protocol.Message) error {
 		b.buf = append(b.buf, data...)
 		tc.writeMu.Unlock()
 
-		// 数据已拷进批次, 编码缓冲可以立刻归还
-		if cap(*bufp) <= maxPooledWriteBuf {
-			writeBufPool.Put(bufp)
-		}
-
 		<-b.done
 		return b.err
 	}
@@ -186,10 +211,6 @@ func (tc *TCPConnection) Write(msg *protocol.Message) error {
 	tc.writeMu.Unlock()
 
 	writeErr := tc.flush(data)
-
-	if cap(*bufp) <= maxPooledWriteBuf {
-		writeBufPool.Put(bufp)
-	}
 
 	// 我写的期间可能有人排上了队, 由我把他们的批次一次性写出去。
 	// 必须排空到没有批次为止 —— 等待者只能靠 leader 唤醒, 中途撒手会让他们永远挂住
@@ -229,6 +250,14 @@ func (tc *TCPConnection) flush(data []byte) error {
 		total += n
 	}
 	return nil
+}
+
+// HasBufferedPacket 判断是否已经有下一个完整包躺在缓冲区里。
+// 为真时下一次 Read 不会阻塞在系统调用上, 调用方可以据此决定是否继续攒批。
+// 只看已拼好的完整包, 不看 bufio 里的半包 —— 半包仍可能需要等待网络。
+// 只能由 Read 所在的协程调用
+func (tc *TCPConnection) HasBufferedPacket() bool {
+	return tc.buffer.HasPacket()
 }
 
 // RemoteAddr 对端地址, 用于日志与问题定位
