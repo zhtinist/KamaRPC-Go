@@ -1,0 +1,17 @@
+# 编译产物
+/cmd/server1/server1
+/cmd/server2/server2
+/cmd/client/client
+/cmd/benchmark/benchmark
+/cmd/benchmark_duration/benchmark_duration
+/bin/
+*.exe
+*.test
+*.out
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
