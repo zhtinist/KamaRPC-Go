@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"kamaRPC/internal/registry"
+	"kamaRPC/internal/core/registry"
 )
 
 var testList = []registry.Instance{{Addr: "A"}, {Addr: "B"}}

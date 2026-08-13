@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"sync"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
+	"kamaRPC/internal/core/transport"
 )
 
 // Handler 负责请求 Body 反序列化 + 反射调用 + 响应组装,

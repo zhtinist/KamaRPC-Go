@@ -1,6 +1,6 @@
 package loadbalance
 
-import "kamaRPC/internal/registry"
+import "kamaRPC/internal/core/registry"
 
 // LoadBalancer 负载均衡策略接口, 实现可插拔
 type LoadBalancer interface {

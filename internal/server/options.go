@@ -3,8 +3,8 @@ package server
 import (
 	"errors"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/limiter"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/limiter"
 )
 
 // ServerOption 函数式选项

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 var headerCases = []Header{

@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"kamaRPC/internal/protocol"
+	"kamaRPC/internal/core/protocol"
 )
 
 // ErrConnClosed 连接已关闭

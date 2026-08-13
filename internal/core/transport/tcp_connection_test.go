@@ -3,8 +3,8 @@ package transport
 import (
 	"testing"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
 )
 
 func encodeMsg(t *testing.T, id uint64, body string) []byte {

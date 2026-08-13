@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"kamaRPC/internal/breaker"
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/limiter"
-	"kamaRPC/internal/loadbalance"
-	"kamaRPC/internal/protocol"
-	"kamaRPC/internal/registry"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/client/breaker"
+	"kamaRPC/internal/client/loadbalance"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/limiter"
+	"kamaRPC/internal/core/protocol"
+	"kamaRPC/internal/core/registry"
+	"kamaRPC/internal/core/transport"
 )
 
 // 客户端侧治理错误

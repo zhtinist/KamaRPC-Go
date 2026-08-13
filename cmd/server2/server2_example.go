@@ -4,8 +4,8 @@ import (
 	"flag"
 	"log"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/registry"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/registry"
 	"kamaRPC/internal/server"
 	"kamaRPC/pkg/api"
 )

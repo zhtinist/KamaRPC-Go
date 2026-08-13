@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 // Message 一条完整的 RPC 消息 = 头部(控制面) + 消息体(数据面)

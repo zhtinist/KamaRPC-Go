@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
+	"kamaRPC/internal/core/transport"
 	"kamaRPC/pkg/api"
 )
 

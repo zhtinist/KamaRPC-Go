@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/limiter"
-	"kamaRPC/internal/protocol"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/limiter"
+	"kamaRPC/internal/core/protocol"
+	"kamaRPC/internal/core/transport"
 )
 
 // Server RPC 服务端: 监听 + 连接管理 + 限流 + 交给 Handler 反射调用

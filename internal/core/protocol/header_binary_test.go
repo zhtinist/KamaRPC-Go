@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 // 两种 Header 编码必须能互相认: 新端发的包老端认不出没关系(老端不认新 Magic),

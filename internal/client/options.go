@@ -4,9 +4,9 @@ import (
 	"errors"
 	"time"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/limiter"
-	"kamaRPC/internal/loadbalance"
+	"kamaRPC/internal/client/loadbalance"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/limiter"
 )
 
 // ClientOption 函数式选项: 新增配置项不需要改 NewClient 的签名

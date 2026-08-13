@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"testing"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
 )
 
 // 多条消息一次写入(流水线), 借用式读取必须逐条给出正确内容 ——

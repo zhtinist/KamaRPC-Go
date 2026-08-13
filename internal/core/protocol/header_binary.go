@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 // Header 的二进制编码(协议 v2)。

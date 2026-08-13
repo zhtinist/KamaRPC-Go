@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"kamaRPC/internal/client"
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/registry"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/registry"
+	"kamaRPC/internal/core/transport"
 	"kamaRPC/pkg/api"
 )
 

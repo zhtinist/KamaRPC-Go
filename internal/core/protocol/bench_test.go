@@ -3,7 +3,7 @@ package protocol
 import (
 	"testing"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 // 典型 RPC 小包: JSON 序列化后的 {"A":1,"B":2} 量级

@@ -1,6 +1,6 @@
 package protocol
 
-import "kamaRPC/internal/codec"
+import "kamaRPC/internal/core/codec"
 
 // Magic 魔数, 用于快速识别非法包。
 //

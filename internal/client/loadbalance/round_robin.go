@@ -3,7 +3,7 @@ package loadbalance
 import (
 	"sync/atomic"
 
-	"kamaRPC/internal/registry"
+	"kamaRPC/internal/core/registry"
 )
 
 // RoundRobin 轮询: A → B → C → A, 均匀简单, 但不感知机器性能差异

@@ -3,7 +3,7 @@ package codec_test
 import (
 	"testing"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 	"kamaRPC/pkg/api"
 	"kamaRPC/pkg/api/pb"
 )

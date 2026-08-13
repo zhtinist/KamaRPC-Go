@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"kamaRPC/internal/registry"
+	"kamaRPC/internal/core/registry"
 )
 
 // Random 随机: 实现最简单, 但短时间内可能连续打到同一台

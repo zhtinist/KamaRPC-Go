@@ -7,9 +7,9 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
-	"kamaRPC/internal/transport"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
+	"kamaRPC/internal/core/transport"
 	"kamaRPC/pkg/api"
 	"kamaRPC/pkg/api/pb"
 )

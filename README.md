@@ -28,27 +28,40 @@
 客户端 readLoop → 按 requestId 找到 Future → Done 唤醒等待方 + 更新熔断统计
 ```
 
-## 目录结构
+## 目录结构与分层
+
+代码按**调用端 / 服务端 / 双方共享**三层组织，依赖方向单向：`client → core ← server`，client 与 server 之间互不依赖。
 
 ```
 ├── cmd/                              # 可执行示例入口
 │   ├── client/                       # 客户端示例：周期性并发 InvokeAsync
-│   ├── server1/                      # 服务端示例1：:9090 注册 Arith/Arith2
-│   ├── server2/                      # 服务端示例2：:9091 只注册 Arith
-│   ├── benchmark/                    # 压测一：固定请求数（异步接口）
-│   └── benchmark_duration/           # 压测二：固定时间窗口（同步接口，含 P50/P90/P99）
-├── internal/                         # 框架核心实现
-│   ├── client/                       # 发现、LB、连接池、熔断、限流、超时
-│   ├── server/                       # 监听、限流、反射调用、响应写回
-│   ├── transport/                    # TCP 连接、粘包拆包、多路复用、Future、连接池
-│   ├── protocol/                     # Header / Message + 编解码
-│   ├── codec/                        # JSON / Protobuf / gzip
-│   ├── registry/                     # etcd 注册发现 + watch + 本地缓存
-│   ├── loadbalance/                  # RR / Random / WeightedRR
-│   ├── breaker/                      # 熔断器状态机
-│   └── limiter/                      # 令牌桶
-└── pkg/api/                          # 示例服务与请求/响应结构体
+│   ├── server1/ server2/             # 服务端示例：:9090 / :9091
+│   ├── benchmark/                    # 压测一：固定请求数（异步/批量接口）
+│   └── benchmark_duration/           # 压测二：固定时间窗口（同步，含 P50/P90/P99）
+├── internal/
+│   ├── core/                         # ── 双方共享的通信内核 ──
+│   │   ├── protocol/                 # Header / Message、二进制与 JSON 两版 Header
+│   │   ├── transport/                # TCP 连接、粘包拆包、多路复用、Future、连接池、写合并
+│   │   ├── codec/                    # JSON / Protobuf / gzip
+│   │   ├── registry/                 # etcd 注册发现 + watch + 本地缓存
+│   │   └── limiter/                  # 令牌桶（两端都用）
+│   ├── client/                       # ── 调用端 ──
+│   │   ├── client.go / options.go    # 发现、选址、熔断、连接池、超时、批量发送
+│   │   ├── loadbalance/              # RR / Random / 平滑 WRR（只有调用端用）
+│   │   └── breaker/                  # 熔断器状态机（只有调用端用）
+│   ├── server/                       # ── 服务端运行时 ──
+│   │   └── server.go / handler.go / service.go   # 监听、限流、方法表、反射调用、响应攒批
+│   └── arch/                         # 架构约束测试：依赖方向写反会直接失败
+└── pkg/api/                          # 示例服务与请求/响应结构体（含 Protobuf 版）
 ```
+
+分层规则由 [`internal/arch`](internal/arch/layering_test.go) 的测试固化，不是靠口头约定：
+
+```bash
+go test ./internal/arch/
+```
+
+它会遍历所有包解析 import，一旦出现 `core` 依赖上层、或 client 与 server 互相依赖，测试直接失败。
 
 ## 环境要求
 

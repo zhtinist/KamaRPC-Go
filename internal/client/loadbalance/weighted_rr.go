@@ -4,7 +4,7 @@ import (
 	"log"
 	"sync"
 
-	"kamaRPC/internal/registry"
+	"kamaRPC/internal/core/registry"
 )
 
 // WeightedRR 平滑加权轮询: 用动态权重实现均匀且平滑的分配,

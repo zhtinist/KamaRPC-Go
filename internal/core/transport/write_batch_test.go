@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"kamaRPC/internal/codec"
-	"kamaRPC/internal/protocol"
+	"kamaRPC/internal/core/codec"
+	"kamaRPC/internal/core/protocol"
 )
 
 // 并发写合并后, 对端必须仍能解出每一条完整且内容正确的消息 ——

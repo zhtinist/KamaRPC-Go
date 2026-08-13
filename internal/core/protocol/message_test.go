@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"kamaRPC/internal/codec"
+	"kamaRPC/internal/core/codec"
 )
 
 // Header 的手写 JSON 编解码。

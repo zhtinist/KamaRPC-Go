@@ -5,7 +5,7 @@ import (
 	"net"
 	"sync"
 
-	"kamaRPC/internal/protocol"
+	"kamaRPC/internal/core/protocol"
 )
 
 // BufferSize 单次 socket 读取的大小, 同时作为 bufio.Reader 的缓冲大小
