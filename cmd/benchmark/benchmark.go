@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -26,6 +27,9 @@ var (
 	etcdAddr    = flag.String("etcd", "localhost:2379", "etcd的地址")
 	serviceName = flag.String("s", "Arith", "服务名")
 	methodName  = flag.String("m", "Add", "方法名")
+	// 客户端限流默认 10000 QPS, 压测时会成为瓶颈,
+	// 所以这里默认放开, 想压限流本身就把它调小
+	rate = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
 )
 
 type callResult struct {
@@ -54,6 +58,7 @@ func main() {
 	c, err := client.NewClient(
 		reg,
 		client.WithClientCodec(codec.JSON),
+		client.WithClientRateLimit(*rate),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
@@ -61,10 +66,11 @@ func main() {
 	defer c.Close()
 
 	var (
-		wg           sync.WaitGroup
-		successCount int64
-		failCount    int64
-		totalLatency int64
+		wg             sync.WaitGroup
+		successCount   int64
+		failCount      int64
+		throttledCount int64
+		totalLatency   int64
 	)
 
 	start := time.Now()
@@ -98,7 +104,11 @@ func main() {
 
 					f, err := c.InvokeAsync(context.Background(), *serviceName, *methodName, args)
 					if err != nil {
-						atomic.AddInt64(&failCount, 1)
+						if errors.Is(err, client.ErrRateLimited) {
+							atomic.AddInt64(&throttledCount, 1)
+						} else {
+							atomic.AddInt64(&failCount, 1)
+						}
 						continue
 					}
 					calls = append(calls, callResult{future: f, reqStart: reqStart})
@@ -145,6 +155,7 @@ func main() {
 	fmt.Printf("Duration:       %v\n", duration)
 	fmt.Printf("Success:        %d\n", successCount)
 	fmt.Printf("Failed:         %d\n", failCount)
+	fmt.Printf("Throttled:      %d\n", throttledCount)
 	fmt.Printf("QPS:            %.2f\n", qps)
 	fmt.Printf("Avg Latency:    %.2f ms\n", avgLatency)
 }

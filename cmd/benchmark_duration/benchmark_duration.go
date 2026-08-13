@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -25,13 +26,17 @@ var (
 	etcdAddr    = flag.String("etcd", "localhost:2379", "etcd的地址")
 	serviceName = flag.String("s", "Arith", "服务名")
 	methodName  = flag.String("m", "Add", "方法名")
+	// 客户端限流默认 10000 QPS, 压测时会成为瓶颈,
+	// 所以这里默认放开, 想压限流本身就把它调小
+	rate = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
 )
 
 type metrics struct {
-	success int64
-	fail    int64
-	latency []int64
-	mu      sync.Mutex
+	success   int64
+	fail      int64
+	throttled int64 // 被客户端限流挡掉的请求, 与真实失败分开统计
+	latency   []int64
+	mu        sync.Mutex
 }
 
 func (m *metrics) recordLatency(us int64) {
@@ -55,6 +60,7 @@ func main() {
 	c, err := client.NewClient(
 		reg,
 		client.WithClientCodec(codec.JSON),
+		client.WithClientRateLimit(*rate),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -97,7 +103,11 @@ func main() {
 					lat := time.Since(reqStart).Microseconds()
 
 					if err != nil {
-						atomic.AddInt64(&m.fail, 1)
+						if errors.Is(err, client.ErrRateLimited) {
+							atomic.AddInt64(&m.throttled, 1)
+						} else {
+							atomic.AddInt64(&m.fail, 1)
+						}
 						continue
 					}
 
@@ -114,7 +124,7 @@ func main() {
 }
 
 func printStats(m *metrics, duration time.Duration) {
-	total := m.success + m.fail
+	total := m.success + m.fail + m.throttled
 	qps := float64(m.success) / duration.Seconds()
 
 	sort.Slice(m.latency, func(i, j int) bool {
@@ -140,6 +150,7 @@ func printStats(m *metrics, duration time.Duration) {
 	fmt.Printf("Total Requests:  %d\n", total)
 	fmt.Printf("Success:         %d\n", m.success)
 	fmt.Printf("Failed:          %d\n", m.fail)
+	fmt.Printf("Throttled:       %d\n", m.throttled)
 	fmt.Printf("QPS:             %.2f\n", qps)
 	fmt.Printf("Avg Latency:     %.2f ms\n", avg)
 	fmt.Printf("P50 Latency:     %.2f ms\n", float64(p50)/1000)
