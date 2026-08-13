@@ -25,7 +25,7 @@ type TCPClient struct {
 	writeMu sync.Mutex // 发包级别串行化
 	seq     uint64     // requestID 生成器
 
-	pending sync.Map // map[uint64]*Future, 多路复用的响应归属表
+	pending *pendingMap // requestID → Future, 多路复用的响应归属表
 
 	closed int32 // 关闭标记
 }
@@ -38,8 +38,9 @@ func newTCPClient(addr string) (*TCPClient, error) {
 	}
 
 	c := &TCPClient{
-		conn: NewTCPConnection(rawConn),
-		addr: addr,
+		conn:    NewTCPConnection(rawConn),
+		addr:    addr,
+		pending: newPendingMap(),
 	}
 	go c.readLoop()
 	return c, nil
@@ -69,12 +70,11 @@ func (c *TCPClient) readLoop() {
 		}
 
 		seq := msg.Header.RequestID
-		val, ok := c.pending.LoadAndDelete(seq)
+		future, ok := c.pending.LoadAndDelete(seq)
 		if !ok {
 			continue
 		}
 
-		future := val.(*Future)
 		if msg.Header.Error != "" {
 			future.Done(nil, errors.New(msg.Header.Error))
 		} else {
@@ -190,12 +190,9 @@ func (c *TCPClient) fail(err error) {
 
 	_ = c.conn.Close()
 
-	c.pending.Range(func(key, value interface{}) bool {
-		future := value.(*Future)
+	for _, future := range c.pending.DrainAll() {
 		future.Done(nil, err)
-		c.pending.Delete(key)
-		return true
-	})
+	}
 }
 
 // Close 主动关闭连接
