@@ -174,7 +174,9 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 			respBuf = respBuf[:0]
 		}
 
-		msg, err := conn.Read()
+		// 借用式读取: 消息只在下一次读之前有效。内联处理在下一次读之前就用完了,
+		// 派发给协程的路径下面会显式拷贝
+		msg, err := conn.ReadBorrowed()
 		if err != nil {
 			// 连接关闭或出错, 退出
 			return
@@ -202,6 +204,9 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 				respBuf = respBuf[:0]
 			}
 
+			// 消息要跨协程存活, 必须脱离连接内部缓冲
+			owned := cloneMessage(msg)
+
 			// 并发上限满了就在这里阻塞, 相当于对读取端反压
 			sem <- struct{}{}
 			wg.Add(1)
@@ -211,7 +216,7 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 					wg.Done()
 				}()
 				s.processAndRecord(conn, msg, service, &avgCost)
-			}(msg, service)
+			}(owned, service)
 			continue
 		}
 
@@ -225,6 +230,15 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 			respBuf = respBuf[:0]
 		}
 	}
+}
+
+// cloneMessage 把借用自连接缓冲的消息拷成独立副本。
+// Header 里的字符串在解析时已经是独立的, 只有 Body 需要拷贝
+func cloneMessage(msg *protocol.Message) *protocol.Message {
+	header := *msg.Header
+	body := make([]byte, len(msg.Body))
+	copy(body, msg.Body)
+	return &protocol.Message{Header: &header, Body: body}
 }
 
 // maxBatchedResponseBytes 攒批响应的上限, 超过就先写出去

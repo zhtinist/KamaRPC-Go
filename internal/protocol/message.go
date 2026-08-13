@@ -130,14 +130,25 @@ func maxHeaderJSONLen(h *Header) int {
 
 // Decode 把一个完整包的字节数组还原成 Message
 func Decode(data []byte) (*Message, error) {
+	msg := &Message{Header: new(Header)}
+	if err := DecodeInto(data, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+// DecodeInto 解码到调用方提供的 Message, 避免每条消息都分配 Message 与 Header。
+//
+// 注意: 未压缩时 msg.Body 指向 data, 生命周期跟随 data; 压缩时是新分配的切片
+func DecodeInto(data []byte, msg *Message) error {
 	// 连固定头都不够, 根本没法解析
 	if len(data) < HeaderFixedLen {
-		return nil, fmt.Errorf("protocol: data too short")
+		return fmt.Errorf("protocol: data too short")
 	}
 
 	magic := binary.BigEndian.Uint16(data[0:2])
 	if magic != MagicJSONHeader && magic != MagicBinaryHeader {
-		return nil, fmt.Errorf("protocol: invalid magic number")
+		return fmt.Errorf("protocol: invalid magic number")
 	}
 
 	headerLen := DecodeHeaderLen(data[2:6])
@@ -146,30 +157,27 @@ func Decode(data []byte) (*Message, error) {
 	totalLen := HeaderFixedLen + int(headerLen) + int(bodyLen)
 	// 必须是完整包才处理
 	if len(data) < totalLen {
-		return nil, fmt.Errorf("protocol: incomplete packet")
+		return fmt.Errorf("protocol: incomplete packet")
 	}
 
 	headerBytes := data[HeaderFixedLen : HeaderFixedLen+int(headerLen)]
-	var header Header
 	if magic == MagicBinaryHeader {
-		if err := parseHeaderBinary(headerBytes, &header); err != nil {
-			return nil, err
+		if err := parseHeaderBinary(headerBytes, msg.Header); err != nil {
+			return err
 		}
-	} else if err := parseHeaderJSON(headerBytes, &header); err != nil {
-		return nil, err
+	} else if err := parseHeaderJSON(headerBytes, msg.Header); err != nil {
+		return err
 	}
 
 	bodyBytes := data[HeaderFixedLen+int(headerLen) : totalLen]
-	if header.Compression != codec.CompressionNone {
+	if msg.Header.Compression != codec.CompressionNone {
 		var err error
-		bodyBytes, err = codec.Decompress(bodyBytes, header.Compression)
+		bodyBytes, err = codec.Decompress(bodyBytes, msg.Header.Compression)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return &Message{
-		Header: &header,
-		Body:   bodyBytes,
-	}, nil
+	msg.Body = bodyBytes
+	return nil
 }

@@ -60,7 +60,9 @@ func (c *TCPClient) nextSeq() uint64 {
 // readLoop 后台协程: 按 RequestID 把响应派发给对应 Future
 func (c *TCPClient) readLoop() {
 	for {
-		msg, err := c.conn.Read()
+		// 借用式读取省掉整包拷贝与每条消息的 Message/Header 分配;
+		// 只有要交给 Future 异步持有的 Body 需要拷一份出来
+		msg, err := c.conn.ReadBorrowed()
 		if err != nil {
 			c.fail(err)
 			return
@@ -76,7 +78,9 @@ func (c *TCPClient) readLoop() {
 		if msg.Header.Error != "" {
 			future.Done(nil, errors.New(msg.Header.Error))
 		} else {
-			future.Done(msg.Body, nil)
+			body := make([]byte, len(msg.Body))
+			copy(body, msg.Body)
+			future.Done(body, nil)
 		}
 	}
 }

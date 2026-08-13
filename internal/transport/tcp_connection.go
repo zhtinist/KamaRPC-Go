@@ -19,8 +19,23 @@ type PacketBuffer struct {
 	lock sync.Mutex
 }
 
-// Read 尝试从缓冲区里切出一个完整包, 不够一个完整包就返回 nil
+// Read 尝试从缓冲区里切出一个完整包(拷贝一份), 不够一个完整包就返回 nil。
+// 返回的切片归调用方所有, 可以任意持有
 func (pb *PacketBuffer) Read() []byte {
+	packet := pb.readBorrowed()
+	if packet == nil {
+		return nil
+	}
+	out := make([]byte, len(packet))
+	copy(out, packet)
+	return out
+}
+
+// readBorrowed 返回指向内部缓冲的完整包, 不拷贝。
+//
+// 借来的切片只在"下一次 Write 之前"有效 —— Write 可能追加、压缩或搬移底层
+// 数组。由于同一条连接的读取只由一个协程完成, 这等价于"下一次 Read 之前有效"
+func (pb *PacketBuffer) readBorrowed() []byte {
 	pb.lock.Lock()
 	defer pb.lock.Unlock()
 
@@ -39,10 +54,7 @@ func (pb *PacketBuffer) Read() []byte {
 		return nil
 	}
 
-	// 必须拷贝: 返回的包会被 Decode 解出 Body 交给 Future 异步持有,
-	// 直接引用共享缓冲区会被后续写入覆盖
-	packet := make([]byte, totalLen)
-	copy(packet, data[:totalLen])
+	packet := data[:totalLen]
 
 	// 移动读偏移; 全部消费完则直接复位, 复用底层数组
 	pb.off += totalLen
@@ -89,6 +101,11 @@ type TCPConnection struct {
 	buffer  *PacketBuffer // 解决粘包/半包
 	readBuf []byte        // 复用的读暂存区, 见 Read 的单协程约定
 
+	// 借用式读取复用的消息与头部, 避免每条消息都分配。
+	// 只由读协程使用, 见 ReadBorrowed 的契约
+	scratchMsg    protocol.Message
+	scratchHeader protocol.Header
+
 	writeMu sync.Mutex  // 保护 writing/batch, 并保证一条消息完整写入
 	writing bool        // 是否已有协程在写(它负责代写排队的批次)
 	batch   *writeBatch // 等待被合并写出的数据
@@ -103,6 +120,33 @@ func NewTCPConnection(conn net.Conn) *TCPConnection {
 			buf: make([]byte, 0, BufferSize*2),
 		},
 		readBuf: make([]byte, BufferSize),
+	}
+}
+
+// ReadBorrowed 读一条消息, 返回的 Message 与其 Body 都指向连接内部缓冲。
+//
+// 契约: 返回值只在**下一次对本连接调用 Read/ReadBorrowed 之前**有效。
+// 需要跨越这个边界持有(比如把 Body 交给 Future, 或丢给协程异步处理)时,
+// 必须先自己拷贝一份。
+//
+// 换来的是零拷贝与零分配: 省掉整包拷贝, 也省掉每条消息的 Message/Header 分配
+func (tc *TCPConnection) ReadBorrowed() (*protocol.Message, error) {
+	for {
+		if packet := tc.buffer.readBorrowed(); packet != nil {
+			tc.scratchMsg.Header = &tc.scratchHeader
+			if err := protocol.DecodeInto(packet, &tc.scratchMsg); err != nil {
+				return nil, err
+			}
+			return &tc.scratchMsg, nil
+		}
+
+		n, err := tc.reader.Read(tc.readBuf)
+		if n > 0 {
+			tc.buffer.Write(tc.readBuf[:n])
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 }
 
