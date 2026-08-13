@@ -73,7 +73,10 @@ type TCPConnection struct {
 	reader  *bufio.Reader // 带缓冲读取, 减少系统调用
 	buffer  *PacketBuffer // 解决粘包/半包
 	readBuf []byte        // 复用的读暂存区, 见 Read 的单协程约定
-	writeMu sync.Mutex    // 保证一条消息完整写入, 避免字节交叉
+
+	writeMu sync.Mutex  // 保护 writing/batch, 并保证一条消息完整写入
+	writing bool        // 是否已有协程在写(它负责代写排队的批次)
+	batch   *writeBatch // 等待被合并写出的数据
 }
 
 // NewTCPConnection 把一个普通 TCP 连接包装成带协议能力的连接
@@ -123,7 +126,30 @@ var writeBufPool = sync.Pool{
 	},
 }
 
-// Write 编码并完整写入一条消息
+// writeBatch 一批等待合并写出的数据。
+// 一条连接上并发写时, 后来者把自己的字节追加进同一批, 由当前正在写的协程
+// (leader)一次性写出去, 把 N 次 write 系统调用压成 1 次
+type writeBatch struct {
+	buf  []byte
+	done chan struct{}
+	err  error
+}
+
+var batchBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, BufferSize)
+		return &buf
+	},
+}
+
+// Write 编码并完整写入一条消息。
+//
+// 采用 group commit: 没有并发写时走快路径, 直接写自己的数据, 不产生任何
+// 额外开销; 有并发写时, 后来者把数据并进批次并等待, 当前的 leader 写完自己
+// 的数据后顺手把整批一次写出。
+//
+// 错误语义与串行版本一致: 每个调用方拿到的都是"自己这条消息所在那次写"的
+// 错误, 因此 SendAsync 依赖写失败判定连接已死的逻辑不受影响。
 func (tc *TCPConnection) Write(msg *protocol.Message) error {
 	bufp := writeBufPool.Get().(*[]byte)
 	data, err := protocol.AppendEncoded((*bufp)[:0], msg)
@@ -133,17 +159,67 @@ func (tc *TCPConnection) Write(msg *protocol.Message) error {
 	}
 	// 记住扩容后的切片, 下次复用更大的容量
 	*bufp = data
-	defer func() {
+
+	tc.writeMu.Lock()
+
+	// 已经有协程在写: 把自己并进批次, 等它代写
+	if tc.writing {
+		if tc.batch == nil {
+			buf := batchBufPool.Get().(*[]byte)
+			tc.batch = &writeBatch{buf: (*buf)[:0], done: make(chan struct{})}
+		}
+		b := tc.batch
+		b.buf = append(b.buf, data...)
+		tc.writeMu.Unlock()
+
+		// 数据已拷进批次, 编码缓冲可以立刻归还
 		if cap(*bufp) <= maxPooledWriteBuf {
 			writeBufPool.Put(bufp)
 		}
-	}()
 
-	// 请求复用 + TCP 流式的双重原因: 必须整条消息串行写入,
-	// 否则会出现 ABAB 交错, 而不是预期的 AABB
+		<-b.done
+		return b.err
+	}
+
+	// 快路径: 当前没人在写, 自己写自己的
+	tc.writing = true
+	tc.writeMu.Unlock()
+
+	writeErr := tc.flush(data)
+
+	if cap(*bufp) <= maxPooledWriteBuf {
+		writeBufPool.Put(bufp)
+	}
+
+	// 我写的期间可能有人排上了队, 由我把他们的批次一次性写出去。
+	// 必须排空到没有批次为止 —— 等待者只能靠 leader 唤醒, 中途撒手会让他们永远挂住
 	tc.writeMu.Lock()
-	defer tc.writeMu.Unlock()
+	for tc.batch != nil {
+		cur := tc.batch
+		tc.batch = nil
+		tc.writeMu.Unlock()
 
+		curErr := tc.flush(cur.buf)
+
+		buf := cur.buf
+		if cap(buf) <= maxPooledWriteBuf {
+			batchBufPool.Put(&buf)
+		}
+		cur.buf = nil
+		cur.err = curErr
+		close(cur.done)
+
+		tc.writeMu.Lock()
+	}
+	tc.writing = false
+	tc.writeMu.Unlock()
+
+	return writeErr
+}
+
+// flush 把整块数据完整写入 socket。
+// 一条消息(或一批消息)必须整体写完, 否则会出现字节交叉, 对端解不出包
+func (tc *TCPConnection) flush(data []byte) error {
 	total := 0
 	for total < len(data) {
 		n, err := tc.conn.Write(data[total:])
