@@ -128,5 +128,7 @@ func (h *Handler) invoke(service *serviceEntry, methodName string, body []byte) 
 		return nil, errVal.(error)
 	}
 
-	return reply.Elem().Interface(), nil
+	// 返回指针而不是 reply.Elem().Interface(): 后者要把结构体值装箱, 等于多一次
+	// 拷贝加一次分配; 指针装进 interface 不分配, 而 JSON 序列化结果完全一样
+	return reply.Interface(), nil
 }

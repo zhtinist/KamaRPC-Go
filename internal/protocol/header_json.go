@@ -116,7 +116,7 @@ func parseHeaderFast(data []byte, h *Header) bool {
 	for {
 		i = skipSpace(data, i)
 
-		key, next, ok := parseRawString(data, i)
+		key, next, ok := parseRawBytes(data, i)
 		if !ok {
 			return false
 		}
@@ -126,27 +126,29 @@ func parseHeaderFast(data []byte, h *Header) bool {
 		}
 		i = skipSpace(data, i+1)
 
-		switch key {
+		switch string(key) { // 编译器不会为这种 switch 分配字符串
 		case "ServiceName":
-			s, next, ok := parseRawString(data, i)
+			b, next, ok := parseRawBytes(data, i)
 			if !ok {
 				return false
 			}
-			h.ServiceName, i = s, next
+			// 服务名取值集合很小, 驻留复用避免每个请求都分配
+			h.ServiceName, i = internBytes(b), next
 
 		case "MethodName":
-			s, next, ok := parseRawString(data, i)
+			b, next, ok := parseRawBytes(data, i)
 			if !ok {
 				return false
 			}
-			h.MethodName, i = s, next
+			h.MethodName, i = internBytes(b), next
 
 		case "Error":
-			s, next, ok := parseRawString(data, i)
+			b, next, ok := parseRawBytes(data, i)
 			if !ok {
 				return false
 			}
-			h.Error, i = s, next
+			// 错误信息是任意文本, 不驻留, 免得把缓存撑爆
+			h.Error, i = string(b), next
 
 		case "RequestID":
 			v, next, ok := parseUint(data, i)
@@ -190,10 +192,12 @@ func parseHeaderFast(data []byte, h *Header) bool {
 	}
 }
 
-// parseRawString 解析不含转义的 JSON 字符串, 含转义或非 ASCII 时返回 false
-func parseRawString(data []byte, i int) (string, int, bool) {
+// parseRawBytes 解析不含转义的 JSON 字符串, 返回指向原缓冲的字节切片;
+// 含转义或非 ASCII 时返回 false, 交给标准库处理。
+// 返回的切片只在本次解析期间有效, 调用方负责转成字符串
+func parseRawBytes(data []byte, i int) ([]byte, int, bool) {
 	if i >= len(data) || data[i] != '"' {
-		return "", i, false
+		return nil, i, false
 	}
 	i++
 
@@ -202,13 +206,13 @@ func parseRawString(data []byte, i int) (string, int, bool) {
 		c := data[i]
 		switch {
 		case c == '"':
-			return string(data[start:i]), i + 1, true
+			return data[start:i], i + 1, true
 		case c == '\\' || c < 0x20 || c >= 0x80:
-			return "", i, false
+			return nil, i, false
 		}
 		i++
 	}
-	return "", i, false
+	return nil, i, false
 }
 
 // parseUint 解析非负整数, 其他数字形式(负号/小数/指数)返回 false
