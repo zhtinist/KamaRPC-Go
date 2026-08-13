@@ -41,8 +41,19 @@ func Encode(msg *Message) ([]byte, error) {
 }
 
 // AppendEncoded 把编码结果追加到 dst 并返回扩展后的切片,
-// 便于调用方复用缓冲区(见 transport 的写缓冲池), 避免每条消息都分配
+// 便于调用方复用缓冲区(见 transport 的写缓冲池), 避免每条消息都分配。
+// Header 走二进制编码(协议 v2)
 func AppendEncoded(dst []byte, msg *Message) ([]byte, error) {
+	return appendEncoded(dst, msg, MagicBinaryHeader)
+}
+
+// AppendEncodedJSONHeader 用 v1 的 JSON Header 编码, 保留下来用于互通测试
+// 与对端只认老格式时的降级
+func AppendEncodedJSONHeader(dst []byte, msg *Message) ([]byte, error) {
+	return appendEncoded(dst, msg, MagicJSONHeader)
+}
+
+func appendEncoded(dst []byte, msg *Message, magic uint16) ([]byte, error) {
 	// 没有 Header 就不知道请求信息, 必须要求不为空
 	if msg.Header == nil {
 		return nil, fmt.Errorf("protocol: header is nil")
@@ -68,10 +79,14 @@ func AppendEncoded(dst []byte, msg *Message) ([]byte, error) {
 	header := *msg.Header
 	header.Compression = compression
 
-	// 一次性把整包拼进同一个缓冲区: 先占住固定头的位置, 直接把 Header JSON
+	// 一次性把整包拼进同一个缓冲区: 先占住固定头的位置, 直接把 Header
 	// 与 Body 追加进去, 最后回填两个长度字段, 不需要中间缓冲
 	base := len(dst)
-	need := HeaderFixedLen + maxHeaderJSONLen(&header) + len(bodyBytes)
+	headerCap := maxHeaderBinaryLen(&header)
+	if magic == MagicJSONHeader {
+		headerCap = maxHeaderJSONLen(&header)
+	}
+	need := HeaderFixedLen + headerCap + len(bodyBytes)
 	if cap(dst)-base < need {
 		grown := make([]byte, base, base+need)
 		copy(grown, dst)
@@ -80,16 +95,20 @@ func AppendEncoded(dst []byte, msg *Message) ([]byte, error) {
 
 	buf := append(dst, fixedHeaderPlaceholder[:]...)
 
-	buf, err := appendHeaderJSON(buf, &header)
-	if err != nil {
-		return nil, err
+	if magic == MagicJSONHeader {
+		var err error
+		if buf, err = appendHeaderJSON(buf, &header); err != nil {
+			return nil, err
+		}
+	} else {
+		buf = appendHeaderBinary(buf, &header)
 	}
 	headerLen := len(buf) - base - HeaderFixedLen
 
 	buf = append(buf, bodyBytes...)
 
 	fixed := buf[base : base+HeaderFixedLen]
-	binary.BigEndian.PutUint16(fixed[0:2], Magic)
+	binary.BigEndian.PutUint16(fixed[0:2], magic)
 	binary.BigEndian.PutUint32(fixed[2:6], uint32(headerLen))
 	binary.BigEndian.PutUint32(fixed[6:10], uint32(len(bodyBytes)))
 
@@ -116,7 +135,8 @@ func Decode(data []byte) (*Message, error) {
 		return nil, fmt.Errorf("protocol: data too short")
 	}
 
-	if binary.BigEndian.Uint16(data[0:2]) != Magic {
+	magic := binary.BigEndian.Uint16(data[0:2])
+	if magic != MagicJSONHeader && magic != MagicBinaryHeader {
 		return nil, fmt.Errorf("protocol: invalid magic number")
 	}
 
@@ -131,7 +151,11 @@ func Decode(data []byte) (*Message, error) {
 
 	headerBytes := data[HeaderFixedLen : HeaderFixedLen+int(headerLen)]
 	var header Header
-	if err := parseHeaderJSON(headerBytes, &header); err != nil {
+	if magic == MagicBinaryHeader {
+		if err := parseHeaderBinary(headerBytes, &header); err != nil {
+			return nil, err
+		}
+	} else if err := parseHeaderJSON(headerBytes, &header); err != nil {
 		return nil, err
 	}
 

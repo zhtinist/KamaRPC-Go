@@ -2,8 +2,19 @@ package protocol
 
 import "kamaRPC/internal/codec"
 
-// Magic 魔数, 用于快速识别非法包
-const Magic uint16 = 0x4B52 // "KR"
+// Magic 魔数, 用于快速识别非法包。
+//
+// 两个取值区分 Header 的编码方式: 收包时按 Magic 分派, 因此新旧两端可以互通。
+// 分帧字段(headerLen/bodyLen)布局与 Magic 无关, 拆包逻辑对两者通用
+const (
+	// MagicJSONHeader 协议 v1: Header 用 JSON 编码(教程原始设计)
+	MagicJSONHeader uint16 = 0x4B52 // "KR"
+	// MagicBinaryHeader 协议 v2: Header 用二进制编码, 见 header_binary.go
+	MagicBinaryHeader uint16 = 0x4B53 // "KS"
+)
+
+// Magic 保留旧名字, 指向 v1, 便于老代码与文档对照
+const Magic = MagicJSONHeader
 
 // HeaderFixedLen 固定头长度: Magic(2) + headerLen(4) + bodyLen(4)
 const HeaderFixedLen = 10
