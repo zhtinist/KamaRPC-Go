@@ -4,15 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KamaRPC 控制台</title>
-<link rel="stylesheet" href="style.css">
+<!-- 样式分三层: 变量 → 基础排版 → 组件 -->
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/components.css">
 </head>
 <body>
 <header>
-  <div class="title">
+  <div class="brand">
     <h1>KamaRPC 控制台</h1>
-    <span class="sub">服务拓扑 · 吞吐 · 延迟 · 运行状态</span>
+    <span class="tagline">服务拓扑 · 吞吐 · 延迟 · 运行状态</span>
   </div>
-  <div class="controls">
+  <div class="toolbar">
     <label>刷新间隔
       <select id="interval">
         <option value="1000" selected>1s</option>
@@ -20,7 +23,7 @@
         <option value="5000">5s</option>
       </select>
     </label>
-    <button id="toggle" class="btn">暂停</button>
+    <button id="toggle" class="btn" type="button">暂停</button>
     <span id="status" class="status">连接中…</span>
   </div>
 </header>
@@ -29,18 +32,18 @@
   <section class="cards" id="summary"></section>
 
   <section class="panel">
-    <h2>总 QPS<span class="hint">按两次采样之间的调用增量计算</span></h2>
-    <canvas id="qpsChart" height="140"></canvas>
+    <h2>总 QPS<span class="hint">对两次采样的累计调用数做差得出</span></h2>
+    <canvas id="qpsChart"></canvas>
   </section>
 
-  <div class="grid">
+  <div class="grid-2">
     <section class="panel">
-      <h2>服务拓扑<span class="hint">来自 etcd，实例上下线会实时反映</span></h2>
+      <h2>服务拓扑<span class="hint">来自 etcd，实例上下线实时反映</span></h2>
       <div id="topology"></div>
     </section>
 
     <section class="panel">
-      <h2>服务端实例<span class="hint">连接数 / 协程数 / 运行时长</span></h2>
+      <h2>服务端实例<span class="hint">抓取失败会显示具体原因</span></h2>
       <div id="targets"></div>
     </section>
   </div>
@@ -55,6 +58,7 @@
   数据来源：<code>/api/overview</code> —— etcd 服务发现 + 各服务端 <code>/stats</code> 只读指标接口
 </footer>
 
-<script src="app.js"></script>
+<!-- 原生 ES 模块: 无打包、无 npm、无 CDN，改完刷新即可 -->
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

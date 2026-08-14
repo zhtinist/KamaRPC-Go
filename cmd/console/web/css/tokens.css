@@ -1,0 +1,22 @@
+/* 设计变量: 颜色、字体、间距。只有这一层定义"长什么样"的原始值,
+   其余样式一律引用变量, 换主题只需要改这里。 */
+:root {
+  --bg: #0f1420;
+  --panel: #171d2c;
+  --panel-2: #1e263a;
+  --line: #2a3348;
+
+  --text: #e6ebf5;
+  --muted: #8b97b1;
+  --dim: #6b7797;
+
+  --accent: #4f9cf9;
+  --ok: #3ecf8e;
+  --warn: #f5a524;
+  --err: #f2555a;
+
+  --radius: 10px;
+  --gap: 18px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+}

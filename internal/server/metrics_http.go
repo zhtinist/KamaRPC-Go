@@ -12,38 +12,20 @@ import (
 
 var processStart = time.Now()
 
-// StatsResponse 服务端自曝的运行状态, 供监控面板抓取
-type StatsResponse struct {
-	Addr        string               `json:"addr"`
-	PID         int                  `json:"pid"`
-	UptimeSec   float64              `json:"uptimeSec"`
-	Goroutines  int                  `json:"goroutines"`
-	Connections int                  `json:"connections"`
-	Services    []ServiceInfo        `json:"services"`
-	Methods     []metrics.MethodStat `json:"methods"`
-	Timestamp   int64                `json:"timestampMs"`
-}
-
-// ServiceInfo 一个已注册服务及其方法名
-type ServiceInfo struct {
-	Name    string   `json:"name"`
-	Methods []string `json:"methods"`
-}
-
 // Metrics 返回服务端的指标采集器
 func (s *Server) Metrics() *metrics.Collector { return s.metrics }
 
 // Stats 汇总当前运行状态
-func (s *Server) Stats() StatsResponse {
+func (s *Server) Stats() metrics.ServerStats {
 	s.mu.Lock()
 	conns := len(s.conns)
-	services := make([]ServiceInfo, 0, len(s.services))
+	services := make([]metrics.ServiceInfo, 0, len(s.services))
 	for name, entry := range s.services {
-		services = append(services, ServiceInfo{Name: name, Methods: entry.MethodNames()})
+		services = append(services, metrics.ServiceInfo{Name: name, Methods: entry.MethodNames()})
 	}
 	s.mu.Unlock()
 
-	return StatsResponse{
+	return metrics.ServerStats{
 		Addr:        s.Addr(),
 		PID:         os.Getpid(),
 		UptimeSec:   time.Since(processStart).Seconds(),
@@ -51,7 +33,7 @@ func (s *Server) Stats() StatsResponse {
 		Connections: conns,
 		Services:    services,
 		Methods:     s.metrics.Snapshot(),
-		Timestamp:   time.Now().UnixMilli(),
+		TimestampMS: time.Now().UnixMilli(),
 	}
 }
 

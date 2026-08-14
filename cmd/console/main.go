@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"kamaRPC/internal/core/metrics"
 	"kamaRPC/internal/core/registry"
-	"kamaRPC/internal/server"
 )
 
 //go:embed web
@@ -88,10 +88,10 @@ type ServiceTopology struct {
 
 // TargetStats 单个 RPC 服务端的抓取结果
 type TargetStats struct {
-	Target string                `json:"target"`
-	OK     bool                  `json:"ok"`
-	Error  string                `json:"error,omitempty"`
-	Stats  *server.StatsResponse `json:"stats,omitempty"`
+	Target string               `json:"target"`
+	OK     bool                 `json:"ok"`
+	Error  string               `json:"error,omitempty"`
+	Stats  *metrics.ServerStats `json:"stats,omitempty"`
 }
 
 func (c *console) topology() []ServiceTopology {
@@ -140,7 +140,7 @@ func (c *console) scrape() []TargetStats {
 				return
 			}
 
-			var stats server.StatsResponse
+			var stats metrics.ServerStats
 			if err := json.Unmarshal(body, &stats); err != nil {
 				out[i].Error = err.Error()
 				return

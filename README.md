@@ -38,8 +38,11 @@
 │   ├── server1/ server2/             # 服务端示例：:9090 / :9091
 │   ├── benchmark/                    # 压测一：固定请求数（异步/批量接口）
 │   ├── benchmark_duration/           # 压测二：固定时间窗口（同步，含 P50/P90/P99）
-│   └── console/                      # Web 监控面板：后端 JSON API + 内嵌前端静态页
-│       └── web/                      # 前端（原生 HTML/CSS/JS，无构建步骤、无外部依赖）
+│   └── console/                      # Web 监控面板后端：JSON API + 托管前端
+│       └── web/                      # 前端（原生 ES 模块，无构建步骤、无 npm、无 CDN）
+│           ├── css/                  # tokens（变量）→ base（骨架）→ components（组件）
+│           └── js/                   # api（取数）· state（换算）· format（纯函数）
+│               └── views/            #   chart（画图）· views/*（各区块渲染）· main（编排）
 ├── internal/
 │   ├── core/                         # ── 双方共享的通信内核 ──
 │   │   ├── protocol/                 # Header / Message、二进制与 JSON 两版 Header
@@ -217,6 +220,19 @@ go run ./cmd/server1 &    # RPC :9090，指标 :9190
 go run ./cmd/server2 &    # RPC :9091，指标 :9191
 go run ./cmd/console      # 面板 http://localhost:8080
 ```
+
+前端也按层拆开，和后端一个思路 —— 每层只干一件事、依赖单向（`main → views → format`、`main → api/state/chart`）：
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| 取数 | `js/api.js` | 只跟后端说话；带超时（轮询场景下卡住的请求会拖垮后续每一轮） |
+| 状态 | `js/state.js` | 存上一次采样，把累计计数差分成速率，维护图表历史 |
+| 纯函数 | `js/format.js` | 数字/时间格式化与 **HTML 转义** |
+| 渲染 | `js/views/*.js` | 概览卡片 / 拓扑 / 实例 / 方法表，各自独立 |
+| 绘图 | `js/chart.js` | canvas 手绘折线 |
+| 编排 | `js/main.js` | 只做调度与分发，不含业务细节 |
+
+安全上有一处必须注意：**服务名、方法名、错误信息都是外部数据**（任何能写 etcd 的进程都能左右），所以全部经 `esc()` 转义后才拼进 `innerHTML`。实测用 `<img src=x onerror=...>` 当服务名，页面按纯文本显示、不会执行。
 
 打开 http://localhost:8080 可以看到：
 

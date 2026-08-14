@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"kamaRPC/internal/core/metrics"
 	"kamaRPC/pkg/api"
 )
 
@@ -33,7 +34,7 @@ func TestStatsHandlerReportsServicesAndMethods(t *testing.T) {
 		t.Fatalf("Content-Type = %q", ct)
 	}
 
-	var got StatsResponse
+	var got metrics.ServerStats
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("响应不是合法 JSON: %v", err)
 	}
