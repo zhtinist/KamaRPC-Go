@@ -169,3 +169,11 @@ func (cb *CircuitBreaker) State() State {
 	defer cb.mu.Unlock()
 	return cb.state
 }
+
+// Snapshot 一次性取出状态与窗口内计数。
+// 分开调用 State() 与计数会拿到不一致的组合, 所以这里在同一把锁里取全
+func (cb *CircuitBreaker) Snapshot() (state State, failures, successes int) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state, cb.failureCount, cb.successCount
+}

@@ -49,9 +49,21 @@
   </div>
 
   <section class="panel">
-    <h2>方法级指标<span class="hint">延迟分位数由服务端直方图近似得出</span></h2>
-    <div id="methods"></div>
+    <h2>熔断器<span class="hint">客户端视角 · 闭合 → 熔断 → 半开探测 → 闭合</span></h2>
+    <div id="breakers"></div>
   </section>
+
+  <div class="grid-2">
+    <section class="panel">
+      <h2>调用方<span class="hint">连接池水位与熔断器数量</span></h2>
+      <div id="clients"></div>
+    </section>
+
+    <section class="panel">
+      <h2>方法级指标（服务端）<span class="hint">延迟分位数由直方图近似得出</span></h2>
+      <div id="methods"></div>
+    </section>
+  </div>
 </main>
 
 <footer>

@@ -30,8 +30,9 @@ var (
 	methodName  = flag.String("m", "Add", "方法名")
 	// 客户端限流默认 10000 QPS, 压测时会成为瓶颈,
 	// 所以这里默认放开, 想压限流本身就把它调小
-	rate     = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
-	poolSize = flag.Int("pool", 1, "单个目标节点的连接池大小")
+	rate      = flag.Int("rate", 1000000, "客户端限流速率(每秒令牌数)")
+	poolSize  = flag.Int("pool", 1, "单个目标节点的连接池大小")
+	statsAddr = flag.String("stats", "", "客户端指标接口地址(如 :9291), 空表示不启动")
 )
 
 type metrics struct {
@@ -67,11 +68,21 @@ func main() {
 		client.WithClientCodec(codecType),
 		client.WithClientRateLimit(*rate),
 		client.WithClientPoolSize(*poolSize),
+		client.WithClientName("load-generator"),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer c.Close()
+
+	if *statsAddr != "" {
+		go func() {
+			log.Printf("client stats endpoint on %s/stats", *statsAddr)
+			if err := c.ServeStats(*statsAddr); err != nil {
+				log.Printf("client stats endpoint stopped: %v", err)
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
 	var m metrics

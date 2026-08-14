@@ -90,6 +90,13 @@ func (p *ConnectionPool) Len() int {
 	return len(p.conns)
 }
 
+// Snapshot 当前水位: 已建连接数、上限、是否已关闭
+func (p *ConnectionPool) Snapshot() (active, maxActive int, closed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.conns), p.maxActive, p.closed
+}
+
 // Close 关闭池内所有连接
 func (p *ConnectionPool) Close() {
 	p.mu.Lock()

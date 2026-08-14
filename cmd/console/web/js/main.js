@@ -9,6 +9,7 @@ import { renderSummary } from './views/summary.js';
 import { renderTopology } from './views/topology.js';
 import { renderTargets } from './views/targets.js';
 import { renderMethods } from './views/methods.js';
+import { renderBreakers, renderClients } from './views/clients.js';
 
 const el = {
   summary: document.getElementById('summary'),
@@ -16,6 +17,8 @@ const el = {
   topology: document.getElementById('topology'),
   targets: document.getElementById('targets'),
   methods: document.getElementById('methods'),
+  breakers: document.getElementById('breakers'),
+  clients: document.getElementById('clients'),
   status: document.getElementById('status'),
   interval: document.getElementById('interval'),
   toggle: document.getElementById('toggle'),
@@ -45,6 +48,8 @@ async function tick() {
     renderTopology(el.topology, data.topology);
     renderTargets(el.targets, data.targets);
     renderMethods(el.methods, data.targets, rates);
+    renderBreakers(el.breakers, data.clients);
+    renderClients(el.clients, data.clients);
     drawSeries(el.chart, state.qpsHistory, { maxPoints: MAX_POINTS });
 
     state.lastError = null;

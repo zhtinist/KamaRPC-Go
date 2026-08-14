@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"kamaRPC/internal/client/loadbalance"
 	"kamaRPC/internal/core/codec"
 	"kamaRPC/internal/core/limiter"
+	"kamaRPC/internal/core/metrics"
 	"kamaRPC/internal/core/protocol"
 	"kamaRPC/internal/core/registry"
 	"kamaRPC/internal/core/transport"
@@ -55,8 +57,11 @@ type Client struct {
 	timeout time.Duration            // 默认调用超时
 	codec   codec.Codec              // 默认序列化协议
 
-	breaker sync.Map // service+addr -> *breaker.CircuitBreaker, 实例级隔离
+	breaker sync.Map // service@addr -> *breaker.CircuitBreaker, 实例级隔离
 	pools   sync.Map // addr -> *transport.ConnectionPool, 连接复用
+
+	name    string             // 用于监控面板区分不同客户端进程
+	metrics *metrics.Collector // 客户端视角的调用量/错误/延迟
 
 	// 熔断与连接池参数
 	breakerWindow      int
@@ -90,6 +95,9 @@ func NewClient(reg *registry.Registry, opts ...ClientOption) (*Client, error) {
 		breakerThreshold:   0.6,
 		breakerOpenTimeout: 5 * time.Second,
 		poolMaxActive:      defaultPoolSize,
+
+		name:    "client",
+		metrics: metrics.NewCollector(),
 	}
 
 	for _, opt := range opts {
@@ -111,18 +119,21 @@ func (c *Client) InvokeAsync(ctx context.Context, service string, method string,
 
 	// 1. 客户端限流
 	if !c.limiter.Allow() {
+		c.metrics.Observe(service, method, 0, true)
 		return nil, ErrRateLimited
 	}
 
 	// 2. 服务发现 + 3. 负载均衡选址
 	addr, err := c.getAddr(service)
 	if err != nil {
+		c.metrics.Observe(service, method, 0, true)
 		return nil, err
 	}
 
 	// 4. 熔断判断
 	br := c.getBreaker(service, addr)
 	if !br.Allow() {
+		c.metrics.Observe(service, method, 0, true)
 		return nil, ErrBreakerOpen
 	}
 
@@ -135,12 +146,14 @@ func (c *Client) InvokeAsync(ctx context.Context, service string, method string,
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		br.RecordFailure()
+		c.metrics.Observe(service, method, 0, true)
 		return nil, err
 	}
 
 	// 6. 序列化参数
 	body, err := c.codec.Marshal(args)
 	if err != nil {
+		c.metrics.Observe(service, method, 0, true)
 		return nil, err
 	}
 
@@ -156,20 +169,24 @@ func (c *Client) InvokeAsync(ctx context.Context, service string, method string,
 	}
 
 	// 8. 发送并返回 Future
+	start := time.Now()
 	future, err := conn.SendAsync(req)
 	if err != nil {
 		br.RecordFailure()
+		c.metrics.Observe(service, method, time.Since(start), true)
 		return nil, err
 	}
 	future.SetCodec(c.codec)
 
-	// 9. Future 完成时更新熔断统计
+	// 9. Future 完成时更新熔断统计与指标。
+	// 客户端这里量到的是完整往返(含网络与排队), 比服务端只量方法执行更接近调用方体感
 	future.OnComplete(func(err error) {
 		if err != nil {
 			br.RecordFailure()
 		} else {
 			br.RecordSuccess()
 		}
+		c.metrics.Observe(service, method, time.Since(start), err != nil)
 	})
 
 	return future, nil
@@ -250,7 +267,9 @@ func (c *Client) InvokeAsyncBatch(ctx context.Context, service string, calls []B
 		return nil, err
 	}
 
-	for _, future := range futures {
+	sentAt := time.Now()
+	for i, future := range futures {
+		method := calls[i].Method
 		future.SetCodec(c.codec)
 		future.OnComplete(func(err error) {
 			if err != nil {
@@ -258,6 +277,7 @@ func (c *Client) InvokeAsyncBatch(ctx context.Context, service string, calls []B
 			} else {
 				br.RecordSuccess()
 			}
+			c.metrics.Observe(service, method, time.Since(sentAt), err != nil)
 		})
 	}
 
@@ -299,9 +319,20 @@ func (c *Client) getAddr(service string) (string, error) {
 	return ins.Addr, nil
 }
 
-// getBreaker 按 service+addr 维度拿熔断器, 让每个下游实例独立熔断
+// breakerKey 按 service@addr 组合出熔断器的键。
+// 服务名不含 @, 所以从右往左找第一个 @ 就能无歧义地拆回来(地址里有冒号但没有 @)
+func breakerKey(service, addr string) string { return service + "@" + addr }
+
+func splitBreakerKey(key string) (service, addr string) {
+	if i := strings.LastIndex(key, "@"); i >= 0 {
+		return key[:i], key[i+1:]
+	}
+	return key, ""
+}
+
+// getBreaker 按 service@addr 维度拿熔断器, 让每个下游实例独立熔断
 func (c *Client) getBreaker(service, addr string) *breaker.CircuitBreaker {
-	key := service + "@" + addr
+	key := breakerKey(service, addr)
 	if v, ok := c.breaker.Load(key); ok {
 		return v.(*breaker.CircuitBreaker)
 	}

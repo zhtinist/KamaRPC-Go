@@ -4,7 +4,7 @@
 // 前端是纯静态页面(无构建步骤、无外部依赖), 靠轮询这些 API 刷新。
 //
 //	GET /api/topology  从 etcd 读服务与实例(反映注册发现的实时状态)
-//	GET /api/stats     抓取各 RPC 服务端的只读指标接口并汇总
+//	GET /api/stats     抓取各服务端与客户端的只读指标接口并汇总
 //	GET /api/overview  上面两者合一, 面板默认用这个, 一次请求拿全
 package main
 
@@ -12,6 +12,7 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -31,6 +32,7 @@ var (
 	addr     = flag.String("addr", ":8080", "面板监听地址")
 	etcdAddr = flag.String("etcd", "localhost:2379", "etcd 地址")
 	targets  = flag.String("targets", "localhost:9190,localhost:9191", "各 RPC 服务端的指标接口地址, 逗号分隔")
+	clients  = flag.String("clients", "localhost:9290,localhost:9291", "各客户端的指标接口地址, 逗号分隔")
 	services = flag.String("services", "Arith,Arith2,ArithPB", "要在拓扑里展示的服务名, 逗号分隔")
 	scrapeTO = flag.Duration("timeout", 2*time.Second, "抓取单个服务端指标的超时")
 )
@@ -47,6 +49,7 @@ func main() {
 	c := &console{
 		reg:      reg,
 		targets:  splitAndTrim(*targets),
+		clients:  splitAndTrim(*clients),
 		services: splitAndTrim(*services),
 		client:   &http.Client{Timeout: *scrapeTO},
 	}
@@ -74,7 +77,8 @@ func main() {
 
 type console struct {
 	reg      *registry.Registry
-	targets  []string
+	targets  []string // 服务端指标接口
+	clients  []string // 客户端指标接口
 	services []string
 	client   *http.Client
 }
@@ -94,6 +98,14 @@ type TargetStats struct {
 	Stats  *metrics.ServerStats `json:"stats,omitempty"`
 }
 
+// ClientTargetStats 单个客户端的抓取结果
+type ClientTargetStats struct {
+	Target string               `json:"target"`
+	OK     bool                 `json:"ok"`
+	Error  string               `json:"error,omitempty"`
+	Stats  *metrics.ClientStats `json:"stats,omitempty"`
+}
+
 func (c *console) topology() []ServiceTopology {
 	out := make([]ServiceTopology, 0, len(c.services))
 	for _, name := range c.services {
@@ -111,8 +123,33 @@ func (c *console) topology() []ServiceTopology {
 	return out
 }
 
-// scrape 并发抓取所有目标, 单个目标失败不影响其余
-func (c *console) scrape() []TargetStats {
+// fetchStats 抓取一个 /stats 端点并解析成 T
+func fetchStats[T any](hc *http.Client, target string) (*T, error) {
+	resp, err := hc.Get("http://" + target + "/stats")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
+	}
+
+	// 限制读取长度: 面板不该因为对端返回一个超大响应就把自己撑爆
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var out T
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// scrapeServers 并发抓取所有服务端, 单个失败不影响其余
+func (c *console) scrapeServers() []TargetStats {
 	out := make([]TargetStats, len(c.targets))
 
 	var wg sync.WaitGroup
@@ -121,32 +158,34 @@ func (c *console) scrape() []TargetStats {
 		go func(i int, target string) {
 			defer wg.Done()
 			out[i] = TargetStats{Target: target}
-
-			resp, err := c.client.Get("http://" + target + "/stats")
+			stats, err := fetchStats[metrics.ServerStats](c.client, target)
 			if err != nil {
 				out[i].Error = err.Error()
 				return
 			}
-			defer resp.Body.Close()
+			out[i].OK, out[i].Stats = true, stats
+		}(i, target)
+	}
+	wg.Wait()
+	return out
+}
 
-			if resp.StatusCode != http.StatusOK {
-				out[i].Error = "HTTP " + resp.Status
-				return
-			}
+// scrapeClients 并发抓取所有客户端
+func (c *console) scrapeClients() []ClientTargetStats {
+	out := make([]ClientTargetStats, len(c.clients))
 
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var wg sync.WaitGroup
+	for i, target := range c.clients {
+		wg.Add(1)
+		go func(i int, target string) {
+			defer wg.Done()
+			out[i] = ClientTargetStats{Target: target}
+			stats, err := fetchStats[metrics.ClientStats](c.client, target)
 			if err != nil {
 				out[i].Error = err.Error()
 				return
 			}
-
-			var stats metrics.ServerStats
-			if err := json.Unmarshal(body, &stats); err != nil {
-				out[i].Error = err.Error()
-				return
-			}
-			out[i].OK = true
-			out[i].Stats = &stats
+			out[i].OK, out[i].Stats = true, stats
 		}(i, target)
 	}
 	wg.Wait()
@@ -158,13 +197,28 @@ func (c *console) handleTopology(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *console) handleStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, r, map[string]interface{}{"targets": c.scrape()})
+	writeJSON(w, r, map[string]interface{}{
+		"targets": c.scrapeServers(),
+		"clients": c.scrapeClients(),
+	})
 }
 
 func (c *console) handleOverview(w http.ResponseWriter, r *http.Request) {
+	// 服务端与客户端并行抓, 拓扑读的是本地缓存, 顺序取即可
+	var (
+		wg      sync.WaitGroup
+		servers []TargetStats
+		clients []ClientTargetStats
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); servers = c.scrapeServers() }()
+	go func() { defer wg.Done(); clients = c.scrapeClients() }()
+	wg.Wait()
+
 	writeJSON(w, r, map[string]interface{}{
 		"topology":    c.topology(),
-		"targets":     c.scrape(),
+		"targets":     servers,
+		"clients":     clients,
 		"timestampMs": time.Now().UnixMilli(),
 	})
 }

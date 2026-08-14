@@ -86,3 +86,14 @@ func WithClientPoolSize(maxActive int) ClientOption {
 		return nil
 	}
 }
+
+// WithClientName 给客户端起个名字, 监控面板用它区分不同的调用方进程
+func WithClientName(name string) ClientOption {
+	return func(c *Client) error {
+		if name == "" {
+			return errors.New("client: name must not be empty")
+		}
+		c.name = name
+		return nil
+	}
+}

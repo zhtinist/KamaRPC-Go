@@ -80,8 +80,21 @@ export function summarize(data, totalQPS, totalErrRate) {
     }
   }
 
+  let openBreakers = 0;
+  let liveClients = 0;
+  for (const c of data.clients ?? []) {
+    if (!c.ok || !c.stats) continue;
+    liveClients += 1;
+    for (const b of c.stats.breakers ?? []) {
+      if (b.state !== 'closed') openBreakers += 1;
+    }
+  }
+
   return {
     totalQPS,
+    openBreakers,
+    liveClients,
+    allClients: (data.clients ?? []).length,
     errorRatio: totalQPS > 0 ? totalErrRate / totalQPS : 0,
     liveTargets: targets.filter((t) => t.ok).length,
     allTargets: targets.length,
