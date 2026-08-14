@@ -22,19 +22,21 @@ func NewHandler(c codec.Codec) *Handler {
 	return &Handler{codec: c}
 }
 
-// Process 调用本地方法并把结果写回对端
-func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry) {
+// Process 调用本地方法并把结果写回对端, 返回这次调用是否失败
+func (h *Handler) Process(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry) bool {
 	bufp := respBufPool.Get().(*[]byte)
-	buf := h.AppendResponse((*bufp)[:0], msg, service)
+	buf, failed := h.AppendResponse((*bufp)[:0], msg, service)
 	*bufp = buf
 
 	if err := conn.WriteRaw(buf); err != nil {
 		log.Println("write response error:", err)
+		failed = true
 	}
 
 	if cap(*bufp) <= maxPooledRespBuf {
 		respBufPool.Put(bufp)
 	}
+	return failed
 }
 
 // maxPooledRespBuf 超过这个容量的响应缓冲不再回池
@@ -64,12 +66,13 @@ func (h *Handler) codecFor(t codec.Type) codec.Codec {
 //
 // 与直接写回相比, 这样可以把多个流水线请求的响应攒在一起、一次写出,
 // 把 N 次 write 系统调用压成 1 次
-func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *serviceEntry) []byte {
+// 返回值 failed 表示这次调用是否以错误告终, 供指标采集使用
+func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *serviceEntry) ([]byte, bool) {
 	c := h.codecFor(msg.Header.CodecType)
 
 	result, err := h.invoke(c, service, msg.Header.MethodName, msg.Body)
 	if err != nil {
-		return AppendErrorResponse(dst, msg.Header.RequestID, err.Error())
+		return AppendErrorResponse(dst, msg.Header.RequestID, err.Error()), true
 	}
 
 	var body []byte
@@ -78,7 +81,7 @@ func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *ser
 		body, marshalErr = c.Marshal(result)
 		if marshalErr != nil {
 			log.Println("marshal error:", marshalErr)
-			return AppendErrorResponse(dst, msg.Header.RequestID, marshalErr.Error())
+			return AppendErrorResponse(dst, msg.Header.RequestID, marshalErr.Error()), true
 		}
 	}
 
@@ -94,9 +97,9 @@ func (h *Handler) AppendResponse(dst []byte, msg *protocol.Message, service *ser
 	out, encErr := protocol.AppendEncoded(dst, resp)
 	if encErr != nil {
 		log.Println("encode response error:", encErr)
-		return AppendErrorResponse(dst, msg.Header.RequestID, encErr.Error())
+		return AppendErrorResponse(dst, msg.Header.RequestID, encErr.Error()), true
 	}
-	return out
+	return out, false
 }
 
 // AppendErrorResponse 把一条只带错误信息的响应追加到 dst

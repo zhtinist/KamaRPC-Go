@@ -9,6 +9,7 @@ import (
 
 	"kamaRPC/internal/core/codec"
 	"kamaRPC/internal/core/limiter"
+	"kamaRPC/internal/core/metrics"
 	"kamaRPC/internal/core/protocol"
 	"kamaRPC/internal/core/transport"
 )
@@ -24,6 +25,8 @@ type Server struct {
 	listener net.Listener
 	handler  *Handler
 	codec    codec.Codec
+
+	metrics *metrics.Collector // 按服务.方法统计调用量/错误/延迟
 
 	mu      sync.Mutex
 	conns   map[*transport.TCPConnection]struct{} // 已建立连接, 用于优雅关闭
@@ -45,6 +48,7 @@ func NewServer(addr string, opts ...ServerOption) (*Server, error) {
 		codec:    defaultCodec,
 		conns:    make(map[*transport.TCPConnection]struct{}),
 		closing:  make(chan struct{}),
+		metrics:  metrics.NewCollector(),
 	}
 
 	for _, opt := range opts {
@@ -185,12 +189,14 @@ func (s *Server) Handle(conn *transport.TCPConnection) {
 		// 服务端限流
 		if !s.limiter.Allow() {
 			respBuf = AppendErrorResponse(respBuf, msg.Header.RequestID, "rate limit exceeded")
+			s.metrics.Observe(msg.Header.ServiceName, msg.Header.MethodName, 0, true)
 			continue
 		}
 
 		service, ok := s.lookup(msg.Header.ServiceName)
 		if !ok {
 			respBuf = AppendErrorResponse(respBuf, msg.Header.RequestID, "service not found: "+msg.Header.ServiceName)
+			s.metrics.Observe(msg.Header.ServiceName, msg.Header.MethodName, 0, true)
 			continue
 		}
 
@@ -244,12 +250,15 @@ func cloneMessage(msg *protocol.Message) *protocol.Message {
 // maxBatchedResponseBytes 攒批响应的上限, 超过就先写出去
 const maxBatchedResponseBytes = 64 << 10
 
-// appendAndRecord 执行调用并把响应追加到 buf, 同时把耗时并入滑动平均
+// appendAndRecord 执行调用并把响应追加到 buf, 同时把耗时并入滑动平均与指标
 func (s *Server) appendAndRecord(dst []byte, msg *protocol.Message, service *serviceEntry, avgCost *int64) []byte {
 	start := time.Now()
-	out := s.handler.AppendResponse(dst, msg, service)
-	cost := int64(time.Since(start))
+	out, failed := s.handler.AppendResponse(dst, msg, service)
+	elapsed := time.Since(start)
 
+	s.metrics.Observe(msg.Header.ServiceName, msg.Header.MethodName, elapsed, failed)
+
+	cost := int64(elapsed)
 	old := atomic.LoadInt64(avgCost)
 	atomic.StoreInt64(avgCost, old-old/8+cost/8)
 	return out
@@ -258,8 +267,12 @@ func (s *Server) appendAndRecord(dst []byte, msg *protocol.Message, service *ser
 // processAndRecord 执行调用并把耗时并入滑动平均, 供分发策略参考
 func (s *Server) processAndRecord(conn *transport.TCPConnection, msg *protocol.Message, service *serviceEntry, avgCost *int64) {
 	start := time.Now()
-	s.handler.Process(conn, msg, service)
-	cost := int64(time.Since(start))
+	failed := s.handler.Process(conn, msg, service)
+	elapsed := time.Since(start)
+
+	s.metrics.Observe(msg.Header.ServiceName, msg.Header.MethodName, elapsed, failed)
+
+	cost := int64(elapsed)
 
 	// EWMA, α = 1/8; 并发更新只要求近似, 不需要严格原子读改写
 	old := atomic.LoadInt64(avgCost)

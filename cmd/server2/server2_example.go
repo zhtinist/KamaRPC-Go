@@ -16,6 +16,7 @@ var (
 	advertise = flag.String("advertise", "localhost:9091", "注册到 etcd 的地址")
 	ttl       = flag.Int64("ttl", 10, "租约时间(秒)")
 	rate      = flag.Int("rate", 100000, "服务端限流速率(每秒令牌数)")
+	statsAddr = flag.String("stats", ":9191", "指标接口监听地址, 供监控面板抓取; 置空则不启动")
 )
 
 // server2 与 server1 的区别只有端口和注册的服务数量,
@@ -49,6 +50,16 @@ func main() {
 		if err := reg.Register(service, registry.Instance{Addr: *advertise}, *ttl); err != nil {
 			log.Fatalf("register %s to etcd failed: %v", service, err)
 		}
+	}
+
+	// 只读指标接口, 单独端口, 挂了不影响 RPC 服务
+	if *statsAddr != "" {
+		go func() {
+			log.Printf("stats endpoint on %s/stats", *statsAddr)
+			if err := srv.ServeStats(*statsAddr); err != nil {
+				log.Printf("stats endpoint stopped: %v", err)
+			}
+		}()
 	}
 
 	log.Printf("server2 listening on %s, advertise %s", *addr, *advertise)
